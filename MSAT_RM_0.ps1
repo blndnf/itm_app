@@ -225,27 +225,39 @@ function Parse-AuditEntries {
     
     $columns = @()
     foreach ($hc in $headerChunks) {
-        $columns += [pscustomobject]@{ Name = $hc.Text; X = $hc.X }
+        $columns += [pscustomobject]@{ Name = $hc.Text; XStart = $hc.X; XEnd = 999 }
     }
-    
+
+    # Setze XEnd fuer jede Spalte (= Start der naechsten Spalte)
+    for ($i = 0; $i -lt $columns.Count; $i++) {
+        if ($i+1 -lt $columns.Count) {
+            $columns[$i].XEnd = $columns[$i+1].XStart
+        } else {
+            $columns[$i].XEnd = 1000
+        }
+    }
+
     Write-Host "Spalten erkannt: $($columns.Count)"
-    
+
     # 3. Finde Tabellenzeilen-Starts (wo User UND Group gleichzeitig gefuellt)
     $tableRowStarts = @()
-    $userColX = $columns[0].X
-    $groupColX = $columns[1].X
-    
+    $userCol = $columns[0]
+    $groupCol = $columns[1]
+
     foreach ($y in ($yGroups.Keys | Sort-Object -Descending)) {
         if ($y -ge ($headerY - 10)) { continue }  # Ueberspringe Header
         if ($y -lt -50) { continue }  # Ueberspringe Footer
-        
+
         $yChunks = $yGroups[$y]
-        
-        # Pruefe ob User-Spalte UND Group-Spalte Text haben
-        $hasUser = $yChunks | Where-Object { [Math]::Abs($_.X - $userColX) -lt 5 }
-        $hasGroup = $yChunks | Where-Object { [Math]::Abs($_.X - $groupColX) -lt 5 -and $_.Text -match "ICPMH" }
-        
-        if ($hasUser -and $hasGroup) {
+
+        # Pruefe ob User-Spalte gefuellt ist
+        $userChunks = $yChunks | Where-Object { $_.X -ge $userCol.XStart -and $_.X -lt $userCol.XEnd }
+
+        # Pruefe ob Group-Spalte gefuellt ist und "ICPMH" enthaelt
+        $groupChunks = $yChunks | Where-Object { $_.X -ge $groupCol.XStart -and $_.X -lt $groupCol.XEnd }
+        $groupText = ($groupChunks | Select-Object -ExpandProperty Text) -join ""
+
+        if ($userChunks -and ($groupText -match "ICPMH")) {
             $tableRowStarts += $y
         }
     }
@@ -283,33 +295,31 @@ function Parse-AuditEntries {
         
         # Extrahiere jede Spalte
         for ($c = 0; $c -lt $columns.Count; $c++) {
-            $colX = $columns[$c].X
-            $nextColX = if ($c+1 -lt $columns.Count) { $columns[$c+1].X } else { 1000 }
+            $col = $columns[$c]
 
-            # Finde Chunks in dieser Spalte
+            # Finde Chunks in dieser Spalte (zwischen XStart und XEnd)
             $colChunks = $rowChunks | Where-Object {
-                $_.X -ge ($colX - 2) -and $_.X -lt $nextColX
+                $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
             } | Sort-Object @{Expression="Y"; Descending=$true}, X
 
             $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join " "
             $cellText = $cellText.Trim()
 
             # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile
-            $colName = $columns[$c].Name
             $finalCellText = $cellText
             if ($i -eq ($tableRowStarts.Count - 1)) {
-                $finalCellText = Clean-FooterFromCell -cellText $cellText -columnName $colName
+                $finalCellText = Clean-FooterFromCell -cellText $cellText -columnName $col.Name
             }
 
             # Zuordnung nach Spaltenname
-            if ($colName -eq "User") { $entry.User = $finalCellText }
-            elseif ($colName -eq "Group") { $entry.Group = $finalCellText }
-            elseif ($colName -match "Time") { $entry.Time = $finalCellText }
-            elseif ($colName -eq "Succeeded") { $entry.Succeeded = $finalCellText }
-            elseif ($colName -eq "Category") { $entry.Category = $finalCellText }
-            elseif ($colName -eq "Reason") { $entry.Reason = $finalCellText }
-            elseif ($colName -eq "Action") { $entry.Action = $finalCellText }
-            elseif ($colName -match "Error") { $entry.ErrorMessage = $finalCellText }
+            if ($col.Name -eq "User") { $entry.User = $finalCellText }
+            elseif ($col.Name -eq "Group") { $entry.Group = $finalCellText }
+            elseif ($col.Name -match "Time") { $entry.Time = $finalCellText }
+            elseif ($col.Name -eq "Succeeded") { $entry.Succeeded = $finalCellText }
+            elseif ($col.Name -eq "Category") { $entry.Category = $finalCellText }
+            elseif ($col.Name -eq "Reason") { $entry.Reason = $finalCellText }
+            elseif ($col.Name -eq "Action") { $entry.Action = $finalCellText }
+            elseif ($col.Name -match "Error") { $entry.ErrorMessage = $finalCellText }
         }
         
         $entries += [pscustomobject]$entry
