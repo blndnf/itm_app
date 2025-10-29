@@ -179,52 +179,66 @@ if ($footerY -eq $null) {
 }
 
 # Funktion: Prueft ob ein Chunk Footer-Text ist
-# Verwendet NUR textbasierte Filterung mit GENERISCHEN Patterns
+# Verwendet Y-Position UND textbasierte Filterung mit GENERISCHEN Patterns
 function Is-FooterChunk {
     param($chunk)
     $text = $chunk.Text.Trim()
 
-    # GENERISCHE Footer-Patterns (nicht hardcoded!)
+    # Wenn kein Footer gefunden, keine Filterung
+    if ($footerY -eq $null) {
+        return $false
+    }
 
-    # Pattern 1: "Page X/Y" - Seitenzahl mit beliebigen Zahlen
-    if ($text -match "^Page\s+\d+/\d+$") {
+    # Chunk muss nahe bei Footer-Y-Position liegen (innerhalb 10 Pixel)
+    if ([Math]::Abs($chunk.Y - $footerY) -ge 10.0) {
+        return $false
+    }
+
+    # GENERISCHE Footer-Patterns (getestet und funktionierend!)
+
+    # Pattern 1a: "Page X/Y" - vollständig oder mit/ohne Leerzeichen
+    if ($text -match "^Page\s*\d+/\d+$") {
         return $true
     }
 
-    # Pattern 2: Text enthält "Date" UND Datum folgt
-    # Matcht: "ion Date : 2024-09-16", "Creation Date: 2024-09-16"
-    # Auch: "llo ion Date : 2024-09-16" (Name-Fragment + Footer verschmolzen)
+    # Pattern 1b: Nur "Page" (separater Chunk)
+    if ($text -match "^Page$") {
+        return $true
+    }
+
+    # Pattern 1c: Nur Seitenzahl "X/Y" (separater Chunk)
+    if ($text -match "^\d+/\d+$") {
+        return $true
+    }
+
+    # Pattern 2a: Text enthält "Date" UND Datum folgt
     if ($text -match "Date.*\d{4}-\d{2}-\d{2}") {
         return $true
     }
 
-    # Pattern 2b: Text endet mit "Date" oder "Date:" (Footer-Fragment allein)
+    # Pattern 2b: Text endet mit "Date" oder "Date:"
     if ($text -match "Date:?\s*$") {
         return $true
     }
 
-    # Pattern 3: Standalone Datum mit führendem Satzzeichen (: oder -)
-    # Matcht: ": 2024-09-16", "- 2024-09-16"
-    if ($text -match "^[:;\-]\s*\d{4}-\d{2}-\d{2}$") {
+    # Pattern 3: Standalone Datum (mit oder ohne Satzzeichen-Prefix)
+    if ($text -match "^[:;\-]?\s*\d{4}-\d{2}-\d{2}$") {
         return $true
     }
 
-    # Pattern 4: Zeitstempel mit abschliessendem Doppelpunkt
-    # Matcht: "12:28:" (Footer), aber NICHT "09:50:56" (normaler Zeitstempel)
-    # Auch: "ors 12:28:" (Group-Fragment + Footer verschmolzen)
-    if ($text -match "\d{1,2}:\d{2}:\s*$") {
+    # Pattern 4: Zeitstempel mit abschliessendem Doppelpunkt ODER Sekunden
+    # Matcht: "12:28:", "12:28:10"
+    if ($text -match "\d{1,2}:\d{2}:(?:\d{2})?\s*$") {
         return $true
     }
 
-    # Pattern 5: Zahl + Leerzeichen + GMT-Zeitzone
-    # Matcht: "10 GMT+02:00" (Footer), aber NICHT "GMT+01:00" (normale Zeitzone)
-    if ($text -match "^\d{1,2}\s+GMT[+-]\d{2}:\d{2}$") {
+    # Pattern 5: GMT-Zeitzone (mit oder ohne Zahlen-Prefix)
+    # Matcht: "10 GMT+02:00", "GMT+02:00"
+    if ($text -match "^(?:\d{1,2}\s+)?GMT[+-]\d{2}:\d{2}$") {
         return $true
     }
 
-    # Pattern 6: Reine GMT-Zeitzone die als zweite/dritte in Zeile auftritt
-    # (wird durch Kontext in der Zellen-Aggregation gefiltert)
-    # Hier nur wenn es alleine steht mit ungewöhnlichem Prefix
+    # Pattern 6: Zahl + GMT Prefix
     if ($text -match "^\d{1,2}\s+GMT") {
         return $true
     }
