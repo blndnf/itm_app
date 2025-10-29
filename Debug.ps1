@@ -162,17 +162,22 @@ $output += "=== SCHRITT 4: TABELLENZEILEN FINDEN ==="
 $output += "(Y-Gruppen wo User-Spalte UND Group-Spalte gefuellt)"
 $output += ""
 
-# ZUERST: Finde Footer Y-Position (enthaelt "Creation Date" UND "Page")
+# ZUERST: Finde Footer Y-Position (enthaelt "Creation" UND "Page")
 $footerY = $null
 foreach ($y in ($yGroups.Keys)) {
     $yChunks = @($yGroups[$y])
     $yText = ($yChunks | Select-Object -ExpandProperty Text) -join " "
-    if ($yText -match "Creation Date:" -and $yText -match "Page \d+/\d+") {
+    if ($yText -match "Creation" -and $yText -match "Page") {
         $footerY = $y
         $output += "Footer gefunden bei Y=$([Math]::Round($footerY, 2))"
         break
     }
 }
+
+# Setze lowestValidY: Untere Grenze fuer gueltige Tabellenzeilen
+# Chunks unterhalb des Footers werden ignoriert
+$lowestValidY = if ($footerY -ne $null) { $footerY + 1.0 } else { -100 }
+$output += "Untere Grenze fuer Tabellenzeilen: Y=$([Math]::Round($lowestValidY, 2))"
 
 $output += ""
 $output += "DEBUG: Pruefe jede Y-Gruppe unterhalb Header..."
@@ -236,8 +241,11 @@ if ($tableRowStarts.Count -gt 0) {
     $output += "Zeile 1: Y=$([Math]::Round($rowStartY, 2)) bis Y=$([Math]::Round($rowEndY, 2))"
     $output += ""
     
-    # Alle Chunks in diesem Y-Bereich
-    $rowChunks = $chunks | Where-Object { $_.Y -le $rowStartY -and $_.Y -gt $rowEndY }
+    # Alle Chunks in diesem Y-Bereich (OHNE Footer-Chunks!)
+    $rowChunks = $chunks | Where-Object {
+        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY -and
+        ($footerY -eq $null -or [Math]::Abs($_.Y - $footerY) -gt 1.0)
+    }
     $output += "Chunks in Zeile: $($rowChunks.Count)"
     $output += ""
     
@@ -301,13 +309,17 @@ $output += $headerLine
 for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
     $rowStartY = $tableRowStarts[$i]
     # rowEndY: Entweder naechste Tabellenzeile ODER lowestValidY (nicht tiefer als Footer!)
-    $rowEndY = if ($i+1 -lt $tableRowStarts.Count) { 
-        $tableRowStarts[$i+1] 
-    } else { 
+    $rowEndY = if ($i+1 -lt $tableRowStarts.Count) {
+        $tableRowStarts[$i+1]
+    } else {
         $lowestValidY - 1  # 1 Pixel oberhalb Footer
     }
-    
-    $rowChunks = $chunks | Where-Object { $_.Y -le $rowStartY -and $_.Y -gt $rowEndY }
+
+    # Hole alle Chunks in diesem Y-Bereich (OHNE Footer-Chunks!)
+    $rowChunks = $chunks | Where-Object {
+        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY -and
+        ($footerY -eq $null -or [Math]::Abs($_.Y - $footerY) -gt 1.0)
+    }
     
     # Sammle Zellinhalte
     $cells = @()
