@@ -185,16 +185,14 @@ function Clean-FooterFromCell {
     $cleaned = $cellText
     $original = $cellText
 
-    # User-Spalte: Entferne "ion Date : YYYY-MM-DD" oder Varianten
+    # User-Spalte: Entferne Footer-Datum am Ende (mit Trennzeichen)
     if ($columnName -eq "User") {
-        # Entferne "llo ion Date : YYYY-MM-DD" (vollständiger Footer-Text verschmolzen)
-        $cleaned = $cleaned -replace "llo\s+ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
-        # Entferne "ion Date : YYYY-MM-DD"
-        $cleaned = $cleaned -replace "ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
-        # Entferne "Date : YYYY-MM-DD"
-        $cleaned = $cleaned -replace "Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
-        # Entferne "Date:YYYY-MM-DD" (ohne Leerzeichen)
-        $cleaned = $cleaned -replace "Date:\d{4}-\d{2}-\d{2}", ""
+        # Entferne " ion Date : YYYY-MM-DD" (ion nicht Teil eines Wortes)
+        $cleaned = $cleaned -replace "(?<!\w)ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$", ""
+        # Entferne " Date : YYYY-MM-DD" oder " Date:YYYY-MM-DD"
+        $cleaned = $cleaned -replace "\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$", ""
+        # Fallback: Entferne Datum-Pattern am Ende (wenn mit Leerzeichen getrennt)
+        $cleaned = $cleaned -replace "\s+\d{4}-\d{2}-\d{2}\s*$", ""
     }
 
     # Group-Spalte: Entferne Zeitstempel-Fragmente (HH:MM oder HH:MM:SS)

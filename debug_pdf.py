@@ -13,24 +13,31 @@ def clean_footer_from_cell(cell_text, column_name):
     import re
     cleaned = cell_text
 
-    # User column: Remove "ion Date : YYYY-MM-DD" or variants
+    # User column: Remove footer date at end (with separator)
     if column_name == "User":
-        cleaned = re.sub(r'ion Date\s*:\s*\d{4}-\d{2}-\d{2}', '', cleaned)
-        cleaned = re.sub(r'Date\s*:\s*\d{4}-\d{2}-\d{2}', '', cleaned)
+        # Remove " ion Date : YYYY-MM-DD" (ion not part of a word)
+        cleaned = re.sub(r'(?<!\w)ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$', '', cleaned, flags=re.IGNORECASE)
+        # Remove " Date : YYYY-MM-DD" or " Date:YYYY-MM-DD"
+        cleaned = re.sub(r'\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$', '', cleaned)
+        # Fallback: Remove date pattern at end (when separated by space)
+        cleaned = re.sub(r'\s+\d{4}-\d{2}-\d{2}\s*$', '', cleaned)
 
     # Group column: Remove timestamp fragments (HH:MM or HH:MM:SS)
     if column_name == "Group":
-        cleaned = re.sub(r'\s*\d{1,2}:\d{2}(?::\d{2})?\s*$', '', cleaned)
+        cleaned = re.sub(r'\s+\d{1,2}:\d{2}:\d{2}\s*$', '', cleaned)
+        cleaned = re.sub(r'\s+\d{1,2}:\d{2}:\s*$', '', cleaned)
+        cleaned = re.sub(r'\s+\d{1,2}:\d{2}\s*$', '', cleaned)
 
     # Time column: Remove everything AFTER first GMT±HH:MM
     if "Time" in column_name:
-        match = re.search(r'(GMT[+-]\d{2}:\d{2})', cleaned)
+        match = re.search(r'(.*?GMT[+-]\d{2}:\d{2})', cleaned)
         if match:
-            cleaned = cleaned[:match.end()]
+            cleaned = match.group(1)
 
     # Error column: Remove "Page X/Y" (with or without space)
     if "Error" in column_name:
         cleaned = re.sub(r'Page\s*\d+/\d+', '', cleaned)
+        cleaned = re.sub(r'^\s*\d+/\d+\s*$', '', cleaned)
 
     return cleaned.strip()
 
