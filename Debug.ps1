@@ -169,23 +169,49 @@ foreach ($y in ($yGroups.Keys)) {
     $yText = ($yChunks | Select-Object -ExpandProperty Text) -join " "
     if ($yText -match "Creation" -and $yText -match "Page") {
         $footerY = $y
-        $output += "Footer gefunden bei Y=$([Math]::Round($footerY, 2))"
+        $output += "Footer-Zeile gefunden bei Y=$([Math]::Round($footerY, 2))"
         break
     }
 }
 
-# Funktion: Prueft ob ein Chunk Footer-Text ist (basierend auf Y-Position mit Toleranz)
+if ($footerY -eq $null) {
+    $output += "WARNUNG: Keine separate Footer-Zeile gefunden - Footer-Chunks koennten inline sein"
+}
+
+# Funktion: Prueft ob ein Chunk Footer-Text ist
+# Verwendet NUR textbasierte Filterung, da Footer-Chunks oft auf derselben Y-Position
+# wie Tabellenzeilen liegen!
 function Is-FooterChunk {
     param($chunk)
+    $text = $chunk.Text.Trim()
 
-    # Wenn kein Footer gefunden, keine Filterung
-    if ($footerY -eq $null) {
-        return $false
+    # Footer-spezifische Text-Patterns (SEHR konservativ!)
+    # Nur Patterns die eindeutig Footer sind und NICHT in normalen Daten vorkommen
+
+    # Pattern 1: "Page X/Y" (vollständig)
+    if ($text -match "^Page \d+/\d+$") {
+        return $true
     }
 
-    # Chunk ist Footer wenn Y-Position innerhalb 5 Pixel vom Footer liegt
-    # UND der Chunk unter der Header-Zeile liegt
-    if ([Math]::Abs($chunk.Y - $footerY) -lt 5.0) {
+    # Pattern 2: Footer-Fragmente mit "Creation" oder "Date:"
+    # Auch "llo ion Date" (vollständiger Footer-Text-Fragment)
+    if ($text -match "ion Date|Creation Date|^Date:\s*$|llo\s+ion\s+Date") {
+        return $true
+    }
+
+    # Pattern 3: Jahreszahl mit führendem ": " (z.B. ": 2024-09-16")
+    if ($text -match "^:\s*\d{4}-\d{2}-\d{2}$") {
+        return $true
+    }
+
+    # Pattern 4: Zeitstempel mit abschließendem Doppelpunkt (z.B. "12:28:")
+    # NUR wenn es mit Doppelpunkt ENDET (normale Zeitstempel haben kein ":" am Ende)
+    if ($text -match "^\d{1,2}:\d{2}:\s*$") {
+        return $true
+    }
+
+    # Pattern 5: GMT+Zeitzone mit vorangehendem Leerzeichen und Zahl (z.B. "10 GMT+02:00")
+    if ($text -match "^\d{1,2}\s+GMT[+-]\d{2}:\d{2}$") {
         return $true
     }
 
