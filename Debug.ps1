@@ -178,72 +178,34 @@ if ($footerY -eq $null) {
     $output += "WARNUNG: Keine separate Footer-Zeile gefunden - Footer-Chunks koennten inline sein"
 }
 
-# Funktion: Prueft ob ein Chunk Footer-Text ist
-# Verwendet Y-Position UND textbasierte Filterung mit GENERISCHEN Patterns
-function Is-FooterChunk {
-    param($chunk)
-    $text = $chunk.Text.Trim()
+# Funktion: Bereinigt Footer-Bestandteile aus fertigen Zelleninhalten (retrospektiv)
+function Clean-FooterFromCell {
+    param($cellText, $columnName)
 
-    # Wenn kein Footer gefunden, keine Filterung
-    if ($footerY -eq $null) {
-        return $false
+    $cleaned = $cellText
+
+    # User-Spalte: Entferne "ion Date : YYYY-MM-DD" oder Varianten
+    if ($columnName -eq "User") {
+        $cleaned = $cleaned -replace "ion Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
+        $cleaned = $cleaned -replace "Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
     }
 
-    # Chunk muss nahe bei Footer-Y-Position liegen (innerhalb 10 Pixel)
-    if ([Math]::Abs($chunk.Y - $footerY) -ge 10.0) {
-        return $false
+    # Group-Spalte: Entferne Zeitstempel-Fragmente (HH:MM oder HH:MM:SS)
+    if ($columnName -eq "Group") {
+        $cleaned = $cleaned -replace "\s*\d{1,2}:\d{2}(?::\d{2})?\s*$", ""
     }
 
-    # GENERISCHE Footer-Patterns (getestet und funktionierend!)
-
-    # Pattern 1a: "Page X/Y" - vollständig oder mit/ohne Leerzeichen
-    if ($text -match "^Page\s*\d+/\d+$") {
-        return $true
+    # Time-Spalte: Entferne alles NACH dem ersten GMT±HH:MM
+    if ($columnName -match "Time") {
+        $cleaned = $cleaned -replace "(GMT[+-]\d{2}:\d{2}).*$", '$1'
     }
 
-    # Pattern 1b: Nur "Page" (separater Chunk)
-    if ($text -match "^Page$") {
-        return $true
+    # Error-Spalte: Entferne "Page X/Y" (mit oder ohne Leerzeichen)
+    if ($columnName -match "Error") {
+        $cleaned = $cleaned -replace "Page\s*\d+/\d+", ""
     }
 
-    # Pattern 1c: Nur Seitenzahl "X/Y" (separater Chunk)
-    if ($text -match "^\d+/\d+$") {
-        return $true
-    }
-
-    # Pattern 2a: Text enthält "Date" UND Datum folgt
-    if ($text -match "Date.*\d{4}-\d{2}-\d{2}") {
-        return $true
-    }
-
-    # Pattern 2b: Text endet mit "Date" oder "Date:"
-    if ($text -match "Date:?\s*$") {
-        return $true
-    }
-
-    # Pattern 3: Standalone Datum (mit oder ohne Satzzeichen-Prefix)
-    if ($text -match "^[:;\-]?\s*\d{4}-\d{2}-\d{2}$") {
-        return $true
-    }
-
-    # Pattern 4: Zeitstempel mit abschliessendem Doppelpunkt ODER Sekunden
-    # Matcht: "12:28:", "12:28:10"
-    if ($text -match "\d{1,2}:\d{2}:(?:\d{2})?\s*$") {
-        return $true
-    }
-
-    # Pattern 5: GMT-Zeitzone (mit oder ohne Zahlen-Prefix)
-    # Matcht: "10 GMT+02:00", "GMT+02:00"
-    if ($text -match "^(?:\d{1,2}\s+)?GMT[+-]\d{2}:\d{2}$") {
-        return $true
-    }
-
-    # Pattern 6: Zahl + GMT Prefix
-    if ($text -match "^\d{1,2}\s+GMT") {
-        return $true
-    }
-
-    return $false
+    return $cleaned.Trim()
 }
 
 # Setze lowestValidY: Untere Grenze fuer gueltige Tabellenzeilen
@@ -312,10 +274,9 @@ if ($tableRowStarts.Count -gt 0) {
     $output += "Zeile 1: Y=$([Math]::Round($rowStartY, 2)) bis Y=$([Math]::Round($rowEndY, 2))"
     $output += ""
     
-    # Alle Chunks in diesem Y-Bereich (OHNE Footer-Chunks!)
+    # Alle Chunks in diesem Y-Bereich
     $rowChunks = $chunks | Where-Object {
-        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY -and
-        -not (Is-FooterChunk $_)
+        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY
     }
     $output += "Chunks in Zeile: $($rowChunks.Count)"
     $output += ""
@@ -386,20 +347,19 @@ for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
         $lowestValidY - 1  # 1 Pixel oberhalb Footer
     }
 
-    # Hole alle Chunks in diesem Y-Bereich (OHNE Footer-Chunks!)
+    # Hole alle Chunks in diesem Y-Bereich
     $rowChunks = $chunks | Where-Object {
-        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY -and
-        -not (Is-FooterChunk $_)
+        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY
     }
-    
+
     # Sammle Zellinhalte
     $cells = @()
     for ($c = 0; $c -lt [Math]::Min(8, $columns.Count); $c++) {
         $col = $columns[$c]
-        $colChunks = $rowChunks | Where-Object { 
-            $_.X -ge $col.XStart -and $_.X -lt $col.XEnd 
+        $colChunks = $rowChunks | Where-Object {
+            $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
         } | Sort-Object @{Expression="Y"; Descending=$true}, X
-        
+
         # INTELLIGENTES Zusammenfuegen
         $cellText = ""
         $lastY = $null
@@ -410,7 +370,14 @@ for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
             $cellText += $chunk.Text
             $lastY = $chunk.Y
         }
-        $cells += $cellText.Trim()
+
+        # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile Footer-Bestandteile entfernen
+        $finalCellText = $cellText.Trim()
+        if ($i -eq ($tableRowStarts.Count - 1)) {
+            $finalCellText = Clean-FooterFromCell -cellText $finalCellText -columnName $col.Name
+        }
+
+        $cells += $finalCellText
     }
     
     # Umbrechen: Text in Zeilen aufteilen wenn zu lang

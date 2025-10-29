@@ -8,6 +8,32 @@ import pdfplumber
 import sys
 from collections import defaultdict
 
+def clean_footer_from_cell(cell_text, column_name):
+    """Retrospectively clean footer components from cell text"""
+    import re
+    cleaned = cell_text
+
+    # User column: Remove "ion Date : YYYY-MM-DD" or variants
+    if column_name == "User":
+        cleaned = re.sub(r'ion Date\s*:\s*\d{4}-\d{2}-\d{2}', '', cleaned)
+        cleaned = re.sub(r'Date\s*:\s*\d{4}-\d{2}-\d{2}', '', cleaned)
+
+    # Group column: Remove timestamp fragments (HH:MM or HH:MM:SS)
+    if column_name == "Group":
+        cleaned = re.sub(r'\s*\d{1,2}:\d{2}(?::\d{2})?\s*$', '', cleaned)
+
+    # Time column: Remove everything AFTER first GMT±HH:MM
+    if "Time" in column_name:
+        match = re.search(r'(GMT[+-]\d{2}:\d{2})', cleaned)
+        if match:
+            cleaned = cleaned[:match.end()]
+
+    # Error column: Remove "Page X/Y" (with or without space)
+    if "Error" in column_name:
+        cleaned = re.sub(r'Page\s*\d+/\d+', '', cleaned)
+
+    return cleaned.strip()
+
 def is_footer_chunk(text):
     """Tests if a text chunk is footer content - IMPROVED patterns"""
     import re
@@ -239,11 +265,11 @@ def analyze_pdf(pdf_path):
             print(f"X={chunk['x']:7.2f} Y={chunk['y']:7.2f} | '{chunk['text']}' | Near footer: {is_near_footer} | Matches pattern: {matches_pattern}")
         print()
 
-        # Extract cells
-        print("--- CELL CONTENTS (After Footer Filtering) ---\n")
+        # Extract cells WITH retrospective cleaning
+        print("--- CELL CONTENTS (WITH Retrospective String Cleaning) ---\n")
 
         for col in columns[:8]:  # First 8 columns
-            col_chunks = [c for c in valid_chunks if col['x_start'] <= c['x'] < col['x_end']]
+            col_chunks = [c for c in row_chunks if col['x_start'] <= c['x'] < col['x_end']]
             col_chunks = sorted(col_chunks, key=lambda c: (-c['y'], c['x']))
 
             # Combine text
@@ -255,7 +281,10 @@ def analyze_pdf(pdf_path):
                 cell_text += chunk['text']
                 last_y = chunk['y']
 
-            print(f"{col['name']:15} : '{cell_text.strip()}'")
+            # Apply retrospective cleaning
+            cleaned_text = clean_footer_from_cell(cell_text.strip(), col['name'])
+
+            print(f"{col['name']:15} : '{cleaned_text}'")
 
         print("\n" + "=" * 60)
 
