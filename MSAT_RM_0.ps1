@@ -302,7 +302,9 @@ function Parse-AuditEntries {
                 $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
             } | Sort-Object @{Expression="Y"; Descending=$true}, X
 
-            $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join " "
+            # Join ohne Leerzeichen und normalisiere dann Whitespace
+            $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join ""
+            $cellText = $cellText -replace "\s+", " "  # Mehrfache Leerzeichen durch eines ersetzen
             $cellText = $cellText.Trim()
 
             # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile
