@@ -183,29 +183,54 @@ function Clean-FooterFromCell {
     param($cellText, $columnName)
 
     $cleaned = $cellText
+    $original = $cellText
 
     # User-Spalte: Entferne "ion Date : YYYY-MM-DD" oder Varianten
     if ($columnName -eq "User") {
-        $cleaned = $cleaned -replace "ion Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
+        # Entferne "llo ion Date : YYYY-MM-DD" (vollständiger Footer-Text verschmolzen)
+        $cleaned = $cleaned -replace "llo\s+ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
+        # Entferne "ion Date : YYYY-MM-DD"
+        $cleaned = $cleaned -replace "ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
+        # Entferne "Date : YYYY-MM-DD"
         $cleaned = $cleaned -replace "Date\s*:\s*\d{4}-\d{2}-\d{2}", ""
+        # Entferne "Date:YYYY-MM-DD" (ohne Leerzeichen)
+        $cleaned = $cleaned -replace "Date:\d{4}-\d{2}-\d{2}", ""
     }
 
     # Group-Spalte: Entferne Zeitstempel-Fragmente (HH:MM oder HH:MM:SS)
     if ($columnName -eq "Group") {
-        $cleaned = $cleaned -replace "\s*\d{1,2}:\d{2}(?::\d{2})?\s*$", ""
+        # Entferne " HH:MM:SS" am Ende
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\d{2}\s*$", ""
+        # Entferne " HH:MM:" am Ende (mit abschliessendem Doppelpunkt)
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\s*$", ""
+        # Entferne " HH:MM" am Ende
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}\s*$", ""
     }
 
     # Time-Spalte: Entferne alles NACH dem ersten GMT±HH:MM
     if ($columnName -match "Time") {
-        $cleaned = $cleaned -replace "(GMT[+-]\d{2}:\d{2}).*$", '$1'
+        # Finde Position des ersten GMT und schneide ab dort ab
+        if ($cleaned -match "(.*?GMT[+-]\d{2}:\d{2})") {
+            $cleaned = $matches[1]
+        }
     }
 
     # Error-Spalte: Entferne "Page X/Y" (mit oder ohne Leerzeichen)
     if ($columnName -match "Error") {
+        # Entferne "Page X/Y" oder "PageX/Y"
         $cleaned = $cleaned -replace "Page\s*\d+/\d+", ""
+        # Entferne nur "X/Y" falls übrig
+        $cleaned = $cleaned -replace "^\s*\d+/\d+\s*$", ""
     }
 
-    return $cleaned.Trim()
+    $result = $cleaned.Trim()
+
+    # Debug: Zeige nur wenn etwas geändert wurde
+    if ($original -ne $result) {
+        $script:cleaningLog += "  [$columnName] '$original' -> '$result'`n"
+    }
+
+    return $result
 }
 
 # Setze lowestValidY: Untere Grenze fuer gueltige Tabellenzeilen
@@ -313,6 +338,9 @@ if ($tableRowStarts.Count -gt 0) {
 $output += "=== SCHRITT 6: REKONSTRUIERTE TABELLE (ALLE ZEILEN) ==="
 $output += ""
 
+# Log für Bereinigungen
+$script:cleaningLog = ""
+
 # Berechne Spaltenbreiten basierend auf tatsaechlicher Pixel-Breite
 $colWidths = @()
 foreach ($col in $columns) {
@@ -411,6 +439,13 @@ for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
     }
     
     $output += $headerLine
+}
+
+# Zeige Bereinigungslog falls vorhanden
+if ($script:cleaningLog -ne "") {
+    $output += ""
+    $output += "=== FOOTER-BEREINIGUNG (Letzte Zeile) ==="
+    $output += $script:cleaningLog
 }
 
 $output | Out-File -FilePath $outputPath -Encoding UTF8
