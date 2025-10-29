@@ -1,0 +1,14 @@
+# Input/Output directories for PDF analysis
+AT_IN/
+AT_OUT/
+
+# PowerShell module cache
+*.dll
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
