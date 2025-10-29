@@ -144,6 +144,45 @@ function Group-ChunksByY {
     return $yGroups
 }
 
+# Retrospektive Footer-Bereinigung von Zelleninhalten
+function Clean-FooterFromCell {
+    param($cellText, $columnName)
+
+    $cleaned = $cellText
+
+    # User-Spalte: Entferne Footer-Datum am Ende (mit Trennzeichen)
+    if ($columnName -eq "User") {
+        # Entferne " ion Date : YYYY-MM-DD" (ion nicht Teil eines Wortes)
+        $cleaned = $cleaned -replace "(?<!\w)ion\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$", ""
+        # Entferne " Date : YYYY-MM-DD" oder " Date:YYYY-MM-DD"
+        $cleaned = $cleaned -replace "\s+Date\s*:\s*\d{4}-\d{2}-\d{2}.*$", ""
+        # Fallback: Entferne Datum-Pattern am Ende (wenn durch Leerzeichen getrennt)
+        $cleaned = $cleaned -replace "\s+\d{4}-\d{2}-\d{2}\s*$", ""
+    }
+
+    # Group-Spalte: Entferne Zeitstempel-Fragmente (HH:MM oder HH:MM:SS)
+    if ($columnName -eq "Group") {
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\d{2}\s*$", ""
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\s*$", ""
+        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}\s*$", ""
+    }
+
+    # Time-Spalte: Entferne alles NACH dem ersten GMT±HH:MM
+    if ($columnName -match "Time") {
+        if ($cleaned -match "(.*?GMT[+-]\d{2}:\d{2})") {
+            $cleaned = $matches[1]
+        }
+    }
+
+    # Error-Spalte: Entferne "Page X/Y" (mit oder ohne Leerzeichen)
+    if ($columnName -match "Error") {
+        $cleaned = $cleaned -replace "Page\s*\d+/\d+", ""
+        $cleaned = $cleaned -replace "^\s*\d+/\d+\s*$", ""
+    }
+
+    return $cleaned.Trim()
+}
+
 # Parse alle Eintraege
 function Parse-AuditEntries {
     param($chunks, $pdfName)
@@ -246,25 +285,31 @@ function Parse-AuditEntries {
         for ($c = 0; $c -lt $columns.Count; $c++) {
             $colX = $columns[$c].X
             $nextColX = if ($c+1 -lt $columns.Count) { $columns[$c+1].X } else { 1000 }
-            
+
             # Finde Chunks in dieser Spalte
-            $colChunks = $rowChunks | Where-Object { 
-                $_.X -ge ($colX - 2) -and $_.X -lt $nextColX 
+            $colChunks = $rowChunks | Where-Object {
+                $_.X -ge ($colX - 2) -and $_.X -lt $nextColX
             } | Sort-Object @{Expression="Y"; Descending=$true}, X
-            
+
             $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join " "
             $cellText = $cellText.Trim()
-            
-            # Zuordnung nach Spaltenname
+
+            # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile
             $colName = $columns[$c].Name
-            if ($colName -eq "User") { $entry.User = $cellText }
-            elseif ($colName -eq "Group") { $entry.Group = $cellText }
-            elseif ($colName -match "Time") { $entry.Time = $cellText }
-            elseif ($colName -eq "Succeeded") { $entry.Succeeded = $cellText }
-            elseif ($colName -eq "Category") { $entry.Category = $cellText }
-            elseif ($colName -eq "Reason") { $entry.Reason = $cellText }
-            elseif ($colName -eq "Action") { $entry.Action = $cellText }
-            elseif ($colName -match "Error") { $entry.ErrorMessage = $cellText }
+            $finalCellText = $cellText
+            if ($i -eq ($tableRowStarts.Count - 1)) {
+                $finalCellText = Clean-FooterFromCell -cellText $cellText -columnName $colName
+            }
+
+            # Zuordnung nach Spaltenname
+            if ($colName -eq "User") { $entry.User = $finalCellText }
+            elseif ($colName -eq "Group") { $entry.Group = $finalCellText }
+            elseif ($colName -match "Time") { $entry.Time = $finalCellText }
+            elseif ($colName -eq "Succeeded") { $entry.Succeeded = $finalCellText }
+            elseif ($colName -eq "Category") { $entry.Category = $finalCellText }
+            elseif ($colName -eq "Reason") { $entry.Reason = $finalCellText }
+            elseif ($colName -eq "Action") { $entry.Action = $finalCellText }
+            elseif ($colName -match "Error") { $entry.ErrorMessage = $finalCellText }
         }
         
         $entries += [pscustomobject]$entry
