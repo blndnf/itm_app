@@ -164,52 +164,28 @@ $output += ""
 
 # ZUERST: Finde Footer Y-Position (enthaelt "Creation" UND "Page")
 $footerY = $null
-$footerYMin = $null  # Niedrigste Y-Position im Footer-Bereich
-$footerYMax = $null  # Hoechste Y-Position im Footer-Bereich
-
 foreach ($y in ($yGroups.Keys)) {
     $yChunks = @($yGroups[$y])
     $yText = ($yChunks | Select-Object -ExpandProperty Text) -join " "
     if ($yText -match "Creation" -and $yText -match "Page") {
         $footerY = $y
-        $output += "Footer-Hauptzeile gefunden bei Y=$([Math]::Round($footerY, 2))"
+        $output += "Footer gefunden bei Y=$([Math]::Round($footerY, 2))"
         break
     }
 }
 
-# Finde ALLE Y-Positionen die Footer-Text enthalten (auch verstreute Chunks!)
-$footerYPositions = @()
-foreach ($chunk in $chunks) {
-    $text = $chunk.Text.Trim()
-    # Footer-Patterns: Creation, Date, Page, Zeitstempel, Datums-Pattern
-    # Auch Fragmente wie "llo", "ion Date", etc.
-    if ($text -match "Creation|Date:|Page \d+/\d+|\d+/\d+$|^\d{4}-\d{2}-\d{2}$|^\d{2}:\d{2}:$|^llo$|ion Date") {
-        $footerYPositions += $chunk.Y
-    }
-}
-
-if ($footerYPositions.Count -gt 0) {
-    $footerYMin = ($footerYPositions | Measure-Object -Minimum).Minimum
-    $footerYMax = ($footerYPositions | Measure-Object -Maximum).Maximum
-    $output += "Footer-Region: Y=$([Math]::Round($footerYMin, 2)) bis Y=$([Math]::Round($footerYMax, 2))"
-    $output += "Footer-Chunks gefunden: $($footerYPositions.Count)"
-} else {
-    $output += "WARNUNG: Keine Footer-Chunks gefunden!"
-}
-
-# Funktion: Prueft ob ein Chunk Footer-Text ist
+# Funktion: Prueft ob ein Chunk Footer-Text ist (basierend auf Y-Position mit Toleranz)
 function Is-FooterChunk {
     param($chunk)
-    $text = $chunk.Text.Trim()
 
-    # 1. Y-basierte Filterung: Liegt im Footer-Bereich?
-    if ($footerYMin -ne $null -and $chunk.Y -ge $footerYMin -and $chunk.Y -le $footerYMax) {
-        return $true
+    # Wenn kein Footer gefunden, keine Filterung
+    if ($footerY -eq $null) {
+        return $false
     }
 
-    # 2. Text-basierte Filterung: Enthaelt Footer-Keywords oder Fragmente?
-    # Patterns fuer: Creation, Date, Page X/Y, Zeitstempel, Datum, Fragmente
-    if ($text -match "Creation|Date:|Page \d+/\d+|\d+/\d+$|^\d{4}-\d{2}-\d{2}$|^\d{2}:\d{2}:$|^llo$|ion Date|^: \d{4}") {
+    # Chunk ist Footer wenn Y-Position innerhalb 5 Pixel vom Footer liegt
+    # UND der Chunk unter der Header-Zeile liegt
+    if ([Math]::Abs($chunk.Y - $footerY) -lt 5.0) {
         return $true
     }
 
@@ -217,7 +193,7 @@ function Is-FooterChunk {
 }
 
 # Setze lowestValidY: Untere Grenze fuer gueltige Tabellenzeilen
-$lowestValidY = if ($footerYMin -ne $null) { $footerYMin + 2.0 } else { -100 }
+$lowestValidY = if ($footerY -ne $null) { $footerY + 5.0 } else { -100 }
 $output += "Untere Grenze fuer Tabellenzeilen: Y=$([Math]::Round($lowestValidY, 2))"
 
 $output += ""
