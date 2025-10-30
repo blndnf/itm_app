@@ -191,30 +191,35 @@ function Parse-AuditEntries {
     Write-Host ""
     Write-Host "=== PARSING STARTEN ==="
     Write-Host "Chunks gesamt: $($chunks.Count)"
-    
-    # 1. Finde Header-Zeile
-    $yGroups = Group-ChunksByY -chunks $chunks
+
+    # Bestimme Seitenzahl
+    $totalPages = ($chunks | Select-Object -ExpandProperty Page -Unique | Measure-Object -Maximum).Maximum
+    Write-Host "Seiten gesamt: $totalPages"
+
+    # 1. Finde Header-Zeile (NUR AUF SEITE 1)
+    $page1Chunks = $chunks | Where-Object { $_.Page -eq 1 }
+    $yGroups = Group-ChunksByY -chunks $page1Chunks
     $headerY = $null
-    
+
     foreach ($y in ($yGroups.Keys | Sort-Object -Descending)) {
         $yChunks = $yGroups[$y]
         $yText = ($yChunks | Sort-Object X | Select-Object -ExpandProperty Text) -join " "
-        
-        if ($yText -match "User" -and $yText -match "Group" -and 
+
+        if ($yText -match "User" -and $yText -match "Group" -and
             $yText -match "Time" -and $yText -match "Category") {
             $headerY = $y
-            Write-Host "Header gefunden bei Y=$([Math]::Round($headerY, 2))"
+            Write-Host "Header gefunden bei Y=$([Math]::Round($headerY, 2)) (Seite 1)"
             break
         }
     }
-    
+
     if (-not $headerY) {
-        Write-Host "FEHLER: Kein Header gefunden!"
+        Write-Host "FEHLER: Kein Header gefunden auf Seite 1!"
         return @()
     }
-    
-    # 2. Extrahiere Spalten-X-Positionen aus Header
-    $headerChunks = $chunks | Where-Object { 
+
+    # 2. Extrahiere Spalten-X-Positionen aus Header (VON SEITE 1)
+    $headerChunks = $page1Chunks | Where-Object { 
         [Math]::Abs($_.Y - $headerY) -lt 2.0 -and
         $_.Text -match "^(User|Group|Time|Succeeded|Category|Reason|Action|Error)"
     } | Sort-Object X
@@ -240,30 +245,43 @@ function Parse-AuditEntries {
 
     Write-Host "Spalten erkannt: $($columns.Count)"
 
-    # 3. Finde Tabellenzeilen-Starts (wo User UND Group gleichzeitig gefuellt)
-    $tableRowStarts = @()
+    # 3. Finde Tabellenzeilen-Starts (UEBER ALLE SEITEN)
+    # User-Eintrag markiert neue Tabellenzeile
+    $tableRowStarts = @()  # Array of [pscustomobject]@{Page=X; Y=Y}
     $userCol = $columns[0]
     $groupCol = $columns[1]
 
-    foreach ($y in ($yGroups.Keys | Sort-Object -Descending)) {
-        if ($y -ge ($headerY - 10)) { continue }  # Ueberspringe Header
-        if ($y -lt -50) { continue }  # Ueberspringe Footer
+    for ($pageNum = 1; $pageNum -le $totalPages; $pageNum++) {
+        $pageChunks = $chunks | Where-Object { $_.Page -eq $pageNum }
+        $pageYGroups = Group-ChunksByY -chunks $pageChunks
 
-        $yChunks = $yGroups[$y]
+        foreach ($y in ($pageYGroups.Keys | Sort-Object -Descending)) {
+            # Auf Seite 1: Ueberspringe Header-Bereich
+            if ($pageNum -eq 1 -and $y -ge ($headerY - 5)) { continue }
 
-        # Pruefe ob User-Spalte gefuellt ist
-        $userChunks = $yChunks | Where-Object { $_.X -ge $userCol.XStart -and $_.X -lt $userCol.XEnd }
+            # Ueberspringe sehr niedrige Y (Footer-Bereich)
+            if ($y -lt 50) { continue }
 
-        # Pruefe ob Group-Spalte gefuellt ist und "ICPMH" enthaelt
-        $groupChunks = $yChunks | Where-Object { $_.X -ge $groupCol.XStart -and $_.X -lt $groupCol.XEnd }
-        $groupText = ($groupChunks | Select-Object -ExpandProperty Text) -join ""
+            $yChunks = @($pageYGroups[$y])
 
-        if ($userChunks -and ($groupText -match "ICPMH")) {
-            $tableRowStarts += $y
+            # Suche in User-Spalte
+            $userChunks = $yChunks | Where-Object { $_.X -ge $userCol.XStart -and $_.X -lt $userCol.XEnd }
+
+            # Wenn User-Spalte gefuellt: Neue Tabellenzeile!
+            if ($userChunks) {
+                # Pruefe auch Group-Spalte zur Validierung
+                $groupChunks = $yChunks | Where-Object { $_.X -ge $groupCol.XStart -and $_.X -lt $groupCol.XEnd }
+                $groupText = ($groupChunks | Select-Object -ExpandProperty Text) -join ""
+
+                if ($groupText -match "ICPMH") {
+                    $tableRowStarts += [pscustomobject]@{ Page=$pageNum; Y=$y }
+                }
+            }
         }
     }
-    
-    $tableRowStarts = $tableRowStarts | Sort-Object -Descending
+
+    # Sortiere: Erst nach Page, dann nach Y (absteigend)
+    $tableRowStarts = $tableRowStarts | Sort-Object Page, @{Expression="Y"; Descending=$true}
     Write-Host "Tabellenzeilen erkannt: $($tableRowStarts.Count)"
     
     if ($tableRowStarts.Count -eq 0) {
@@ -271,18 +289,54 @@ function Parse-AuditEntries {
         return @()
     }
     
-    # 4. Fuer jede Tabellenzeile: Extrahiere Zellen
+    # 4. Fuer jede Tabellenzeile: Extrahiere Zellen (MULTI-PAGE)
     $entries = @()
-    
+
     for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
-        $rowStartY = $tableRowStarts[$i]
-        $rowEndY = if ($i+1 -lt $tableRowStarts.Count) { $tableRowStarts[$i+1] } else { -100 }
-        
-        # Hole alle Chunks in diesem Y-Bereich
-        $rowChunks = $chunks | Where-Object { $_.Y -le $rowStartY -and $_.Y -gt $rowEndY }
-        
+        $currentRow = $tableRowStarts[$i]
+        $nextRow = if ($i+1 -lt $tableRowStarts.Count) { $tableRowStarts[$i+1] } else { $null }
+
+        # Sammle Chunks: Von currentRow bis nextRow (über Seiten hinweg)
+        $rowChunks = @()
+        if ($nextRow) {
+            # Fall 1: Es gibt eine nächste Zeile
+            if ($currentRow.Page -eq $nextRow.Page) {
+                # Gleiche Seite: Einfacher Y-Bereich
+                $rowChunks = $chunks | Where-Object {
+                    $_.Page -eq $currentRow.Page -and
+                    $_.Y -le $currentRow.Y -and $_.Y -gt $nextRow.Y
+                }
+            } else {
+                # Mehrere Seiten
+                for ($p = $currentRow.Page; $p -le $nextRow.Page; $p++) {
+                    if ($p -eq $currentRow.Page) {
+                        # Start-Seite: Ab currentRow.Y nach unten
+                        $rowChunks += $chunks | Where-Object {
+                            $_.Page -eq $p -and $_.Y -le $currentRow.Y -and $_.Y -gt 50
+                        }
+                    } elseif ($p -eq $nextRow.Page) {
+                        # End-Seite: Von oben bis nextRow.Y
+                        $rowChunks += $chunks | Where-Object {
+                            $_.Page -eq $p -and $_.Y -gt $nextRow.Y
+                        }
+                    } else {
+                        # Zwischenseite: Alles außer Header/Footer
+                        $rowChunks += $chunks | Where-Object {
+                            $_.Page -eq $p -and $_.Y -lt 500 -and $_.Y -gt 50
+                        }
+                    }
+                }
+            }
+        } else {
+            # Fall 2: Letzte Zeile im Dokument
+            $rowChunks = $chunks | Where-Object {
+                ($_.Page -eq $currentRow.Page -and $_.Y -le $currentRow.Y) -or
+                ($_.Page -gt $currentRow.Page -and $_.Y -gt 50 -and $_.Y -lt 500)
+            }
+        }
+
         $entry = [ordered]@{
-            Page         = ($rowChunks | Select-Object -First 1).Page
+            Page         = $currentRow.Page
             User         = ""
             Group        = ""
             Time         = ""
@@ -301,7 +355,7 @@ function Parse-AuditEntries {
             # Finde Chunks in dieser Spalte (zwischen XStart und XEnd)
             $colChunks = $rowChunks | Where-Object {
                 $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
-            } | Sort-Object @{Expression="Y"; Descending=$true}, X
+            } | Sort-Object Page, @{Expression="Y"; Descending=$true}, X
 
             # Join ohne Leerzeichen und normalisiere dann Whitespace
             $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join ""
