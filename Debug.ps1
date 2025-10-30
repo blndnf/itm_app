@@ -51,15 +51,22 @@ $pdfName = [System.IO.Path]::GetFileNameWithoutExtension($pdfPath)
 Write-Host "Analysiere: $($ofd.SafeFileName)"
 
 $reader = New-Object iTextSharp.text.pdf.PdfReader -ArgumentList $pdfPath
-$strategy = New-Object CoordinateTextExtractionStrategy
-[void][iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, 1, $strategy)
+$totalPages = $reader.NumberOfPages
+Write-Host "Seiten gesamt: $totalPages"
+
+# Extrahiere Chunks von ALLEN Seiten
 $chunks = @()
-foreach ($chunk in $strategy.TextChunks) {
-    $chunks += [pscustomobject]@{ Page=1; X=$chunk.X; Y=$chunk.Y; Text=$chunk.Text }
+for ($pageNum = 1; $pageNum -le $totalPages; $pageNum++) {
+    $strategy = New-Object CoordinateTextExtractionStrategy
+    [void][iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, $pageNum, $strategy)
+
+    foreach ($chunk in $strategy.TextChunks) {
+        $chunks += [pscustomobject]@{ Page=$pageNum; X=$chunk.X; Y=$chunk.Y; Text=$chunk.Text }
+    }
 }
 $reader.Close()
 
-Write-Host "Chunks: $($chunks.Count)"
+Write-Host "Chunks gesamt (alle Seiten): $($chunks.Count)"
 Write-Host ""
 
 $outputPath = Join-Path $ScriptPath "$pdfName`_debug_super_detail.txt"
@@ -107,33 +114,38 @@ foreach ($y in $yKeys) {
     $output += ""
 }
 
-# === SCHRITT 2: HEADER FINDEN ===
-$output += "=== SCHRITT 2: HEADER FINDEN ==="
+# === SCHRITT 2: HEADER FINDEN (NUR SEITE 1) ===
+$output += "=== SCHRITT 2: HEADER FINDEN (NUR SEITE 1) ==="
 $output += ""
 
+# Suche Header nur auf Seite 1
+$page1Chunks = $chunks | Where-Object { $_.Page -eq 1 }
 $headerY = $null
 foreach ($y in ($yGroups.Keys | Sort-Object -Descending)) {
-    $yChunks = @($yGroups[$y])
+    $yChunks = @($yGroups[$y]) | Where-Object { $_.Page -eq 1 }
+    if ($yChunks.Count -eq 0) { continue }
+
     $texts = $yChunks | Select-Object -ExpandProperty Text
     if (($texts -contains "User") -and ($texts -contains "Group") -and ($texts -contains "Category")) {
         $headerY = $y
-        $output += "Header gefunden bei Y=$([Math]::Round($headerY, 2))"
+        $output += "Header gefunden bei Y=$([Math]::Round($headerY, 2)) (Seite 1)"
         break
     }
 }
 
 if (-not $headerY) {
-    $output += "FEHLER: Kein Header!"
+    $output += "FEHLER: Kein Header auf Seite 1!"
     $output | Out-File -FilePath $outputPath -Encoding UTF8
     return
 }
 
-# === SCHRITT 3: SPALTEN DEFINIEREN ===
+# === SCHRITT 3: SPALTEN DEFINIEREN (VON SEITE 1) ===
 $output += ""
-$output += "=== SCHRITT 3: SPALTEN DEFINIEREN ==="
+$output += "=== SCHRITT 3: SPALTEN DEFINIEREN (VON SEITE 1) ==="
+$output += "Spaltenbreiten werden fuer ALLE Seiten verwendet"
 $output += ""
 
-$headerChunks = $chunks | Where-Object { 
+$headerChunks = $page1Chunks | Where-Object {
     [Math]::Abs($_.Y - $headerY) -lt 2.0 -and
     $_.Text -match "^(User|Group|Time|Succeeded|Category|Reason|Action|Error)"
 } | Sort-Object X
@@ -231,101 +243,141 @@ function Clean-FooterFromCell {
     return $result
 }
 
-# Setze lowestValidY: Untere Grenze fuer gueltige Tabellenzeilen
-$lowestValidY = if ($footerY -ne $null) { $footerY + 5.0 } else { -100 }
-$output += "Untere Grenze fuer Tabellenzeilen: Y=$([Math]::Round($lowestValidY, 2))"
-
+# === SCHRITT 4: TABELLENZEILEN FINDEN (UEBER ALLE SEITEN) ===
 $output += ""
-$output += "DEBUG: Pruefe jede Y-Gruppe unterhalb Header..."
+$output += "=== SCHRITT 4: TABELLENZEILEN FINDEN (UEBER ALLE SEITEN) ==="
+$output += "Ein User-Eintrag markiert eine neue Tabellenzeile"
 $output += ""
 
 $userCol = $columns[0]
 $groupCol = $columns[1]
-$tableRowStarts = @()
+$tableRowStarts = @()  # Array of [pscustomobject]@{Page=X; Y=Y}
 
-$checkedCount = 0
-foreach ($y in ($yGroups.Keys | Sort-Object -Descending)) {
-    # Ueberspringe Header-Bereich
-    if ($y -ge ($headerY - 5)) { continue }
-    
-    # Ueberspringe Footer-Zeile
-    if ($footerY -ne $null -and [Math]::Abs($y - $footerY) -lt 1.0) { continue }
-    
-    $checkedCount++
-    $yChunks = @($yGroups[$y])
-    
-    # Suche in User-Spalte
-    $userChunks = $yChunks | Where-Object { $_.X -ge $userCol.XStart -and $_.X -lt $userCol.XEnd }
-    
-    # Suche in Group-Spalte - ERST zusammensetzen, DANN pruefen
-    $groupChunks = $yChunks | Where-Object { $_.X -ge $groupCol.XStart -and $_.X -lt $groupCol.XEnd }
-    $groupText = ($groupChunks | Sort-Object X | Select-Object -ExpandProperty Text) -join ""
-    
-    # DEBUG erste 5 Y-Gruppen
-    if ($checkedCount -le 5) {
-        $userText = ($userChunks | Sort-Object X | Select-Object -ExpandProperty Text) -join ""
-        $hasUser = if ($userChunks) { "JA" } else { "NEIN" }
-        $hasGroup = if ($groupText -match "ICPMH") { "JA" } else { "NEIN" }
-        $output += "Y=$([Math]::Round($y, 2))"
-        $output += "  User-Spalte ($($userCol.XStart)-$($userCol.XEnd)): $hasUser | '$userText'"
-        $output += "  Group-Spalte ($($groupCol.XStart)-$($groupCol.XEnd)): $hasGroup | '$groupText'"
-        $output += ""
+# Durchlaufe jede Seite
+for ($pageNum = 1; $pageNum -le $totalPages; $pageNum++) {
+    $output += "--- Seite $pageNum ---"
+
+    $pageChunks = $chunks | Where-Object { $_.Page -eq $pageNum }
+    $pageYGroups = Group-ChunksByY -chunks $pageChunks
+
+    $foundOnPage = 0
+    foreach ($y in ($pageYGroups.Keys | Sort-Object -Descending)) {
+        # Auf Seite 1: Ueberspringe Header-Bereich
+        if ($pageNum -eq 1 -and $y -ge ($headerY - 5)) { continue }
+
+        # Ueberspringe sehr niedrige Y (Footer-Bereich)
+        if ($y -lt 50) { continue }
+
+        $yChunks = @($pageYGroups[$y])
+
+        # Suche in User-Spalte
+        $userChunks = $yChunks | Where-Object { $_.X -ge $userCol.XStart -and $_.X -lt $userCol.XEnd }
+
+        # Wenn User-Spalte gefuellt: Neue Tabellenzeile!
+        if ($userChunks) {
+            # Optional: Pruefe auch Group-Spalte zur Validierung
+            $groupChunks = $yChunks | Where-Object { $_.X -ge $groupCol.XStart -and $_.X -lt $groupCol.XEnd }
+            $groupText = ($groupChunks | Select-Object -ExpandProperty Text) -join ""
+
+            if ($groupText -match "ICPMH") {
+                $userText = ($userChunks | Select-Object -ExpandProperty Text) -join ""
+                $userText = $userText -replace "\s+", " "
+                $userText = $userText.Trim()
+
+                $tableRowStarts += [pscustomobject]@{ Page=$pageNum; Y=$y }
+                $foundOnPage++
+                $output += "  >>> User-Eintrag bei Y=$([Math]::Round($y, 2)) | User:'$userText'"
+            }
+        }
     }
-    
-    if ($userChunks -and ($groupText -match "ICPMH")) {
-        $tableRowStarts += $y
-        $userText = ($userChunks | Sort-Object X | Select-Object -ExpandProperty Text) -join " "
-        $output += ">>> GEFUNDEN bei Y=$([Math]::Round($y, 2)) | User:'$userText' | Group:'$groupText'"
-    }
+
+    $output += "  Tabellenzeilen auf Seite $pageNum`: $foundOnPage"
+    $output += ""
 }
 
-$output += "Geprueft: $checkedCount Y-Gruppen"
-
-$output += ""
-$output += "Tabellenzeilen gefunden: $($tableRowStarts.Count)"
+$output += "Tabellenzeilen gesamt: $($tableRowStarts.Count)"
 $output += ""
 
-# === SCHRITT 5: ERSTE ZEILE EXTRAHIEREN (DETAIL) ===
+# === SCHRITT 5: ERSTE ZEILE EXTRAHIEREN (DETAIL MIT MULTI-PAGE) ===
 if ($tableRowStarts.Count -gt 0) {
-    $output += "=== SCHRITT 5: ERSTE TABELLENZEILE EXTRAHIEREN ==="
+    $output += "=== SCHRITT 5: ERSTE TABELLENZEILE EXTRAHIEREN (MULTI-PAGE) ==="
     $output += ""
-    
-    $tableRowStarts = $tableRowStarts | Sort-Object -Descending
-    $rowStartY = $tableRowStarts[0]
-    $rowEndY = if ($tableRowStarts.Count -gt 1) { $tableRowStarts[1] } else { -100 }
-    
-    $output += "Zeile 1: Y=$([Math]::Round($rowStartY, 2)) bis Y=$([Math]::Round($rowEndY, 2))"
-    $output += ""
-    
-    # Alle Chunks in diesem Y-Bereich
-    $rowChunks = $chunks | Where-Object {
-        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY
+
+    # Sortiere: Erst nach Page, dann nach Y (absteigend)
+    $tableRowStarts = $tableRowStarts | Sort-Object Page, @{Expression="Y"; Descending=$true}
+
+    $firstRow = $tableRowStarts[0]
+    $secondRow = if ($tableRowStarts.Count -gt 1) { $tableRowStarts[1] } else { $null }
+
+    $output += "Zeile 1: Seite $($firstRow.Page), Y=$([Math]::Round($firstRow.Y, 2))"
+    if ($secondRow) {
+        $output += "  bis: Seite $($secondRow.Page), Y=$([Math]::Round($secondRow.Y, 2))"
+    } else {
+        $output += "  bis: Ende des Dokuments"
     }
-    $output += "Chunks in Zeile: $($rowChunks.Count)"
     $output += ""
-    
+
+    # Sammle Chunks: Von firstRow bis secondRow (über Seiten hinweg)
+    $rowChunks = @()
+    if ($secondRow) {
+        # Fall 1: Es gibt eine nächste Zeile
+        if ($firstRow.Page -eq $secondRow.Page) {
+            # Gleiche Seite: Einfacher Y-Bereich
+            $rowChunks = $chunks | Where-Object {
+                $_.Page -eq $firstRow.Page -and
+                $_.Y -le $firstRow.Y -and $_.Y -gt $secondRow.Y
+            }
+        } else {
+            # Mehrere Seiten: Sammle von Start-Seite bis Ende, dann alle Zwischenseiten, dann End-Seite
+            for ($p = $firstRow.Page; $p -le $secondRow.Page; $p++) {
+                if ($p -eq $firstRow.Page) {
+                    # Start-Seite: Ab firstRow.Y nach unten
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -le $firstRow.Y -and $_.Y -gt 50  # bis footer
+                    }
+                } elseif ($p -eq $secondRow.Page) {
+                    # End-Seite: Von oben bis secondRow.Y
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -gt $secondRow.Y
+                    }
+                } else {
+                    # Zwischenseite: Alles außer Header/Footer
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -lt 500 -and $_.Y -gt 50
+                    }
+                }
+            }
+        }
+    } else {
+        # Fall 2: Letzte Zeile im Dokument
+        $rowChunks = $chunks | Where-Object {
+            ($_.Page -eq $firstRow.Page -and $_.Y -le $firstRow.Y) -or
+            ($_.Page -gt $firstRow.Page -and $_.Y -gt 50 -and $_.Y -lt 500)
+        }
+    }
+
+    $output += "Chunks in Zeile (über alle Seiten): $($rowChunks.Count)"
+    $output += ""
+
     # Fuer jede Spalte
     foreach ($col in $columns) {
-        $colChunks = $rowChunks | Where-Object { 
-            $_.X -ge $col.XStart -and $_.X -lt $col.XEnd 
-        } | Sort-Object @{Expression="Y"; Descending=$true}, X
-        
-        # INTELLIGENTES Zusammenfuegen: Gleiche Y -> kein Space, andere Y -> Space
-        $cellText = ""
-        $lastY = $null
-        foreach ($chunk in $colChunks) {
-            if ($lastY -ne $null -and [Math]::Abs($chunk.Y - $lastY) -gt 1.0) {
-                $cellText += " "  # Verschiedene Y-Zeilen -> Leerzeichen
-            }
-            $cellText += $chunk.Text
-            $lastY = $chunk.Y
-        }
-        
-        $output += "$($col.Name.PadRight(15)): '$($cellText.Trim())'"
-        
+        $colChunks = $rowChunks | Where-Object {
+            $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
+        } | Sort-Object Page, @{Expression="Y"; Descending=$true}, X
+
+        # Join ohne Leerzeichen, dann normalisieren
+        $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join ""
+        $cellText = $cellText -replace "\s+", " "
+        $cellText = $cellText.Trim()
+
+        $output += "$($col.Name.PadRight(15)): '$cellText'"
+
         if ($colChunks) {
-            foreach ($chunk in $colChunks) {
-                $output += "    X=$([Math]::Round($chunk.X, 2).ToString().PadLeft(7)) Y=$([Math]::Round($chunk.Y, 2).ToString().PadLeft(7)) | '$($chunk.Text)'"
+            foreach ($chunk in ($colChunks | Select-Object -First 10)) {
+                $output += "    Seite$($chunk.Page) X=$([Math]::Round($chunk.X, 2).ToString().PadLeft(6)) Y=$([Math]::Round($chunk.Y, 2).ToString().PadLeft(6)) | '$($chunk.Text)'"
+            }
+            if ($colChunks.Count -gt 10) {
+                $output += "    ... und $($colChunks.Count - 10) weitere Chunks"
             }
         }
         $output += ""
@@ -363,19 +415,45 @@ for ($i = 0; $i -lt [Math]::Min(8, $columns.Count); $i++) {
 $output += $headerText
 $output += $headerLine
 
-# ALLE Zeilen (nicht nur erste 5!)
+# ALLE Zeilen (Multi-Page Support!)
 for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
-    $rowStartY = $tableRowStarts[$i]
-    # rowEndY: Entweder naechste Tabellenzeile ODER lowestValidY (nicht tiefer als Footer!)
-    $rowEndY = if ($i+1 -lt $tableRowStarts.Count) {
-        $tableRowStarts[$i+1]
-    } else {
-        $lowestValidY - 1  # 1 Pixel oberhalb Footer
-    }
+    $currentRow = $tableRowStarts[$i]
+    $nextRow = if ($i+1 -lt $tableRowStarts.Count) { $tableRowStarts[$i+1] } else { $null }
 
-    # Hole alle Chunks in diesem Y-Bereich
-    $rowChunks = $chunks | Where-Object {
-        $_.Y -le $rowStartY -and $_.Y -gt $rowEndY
+    # Sammle Chunks: Von currentRow bis nextRow (über Seiten hinweg)
+    $rowChunks = @()
+    if ($nextRow) {
+        # Fall 1: Es gibt eine nächste Zeile
+        if ($currentRow.Page -eq $nextRow.Page) {
+            # Gleiche Seite: Einfacher Y-Bereich
+            $rowChunks = $chunks | Where-Object {
+                $_.Page -eq $currentRow.Page -and
+                $_.Y -le $currentRow.Y -and $_.Y -gt $nextRow.Y
+            }
+        } else {
+            # Mehrere Seiten
+            for ($p = $currentRow.Page; $p -le $nextRow.Page; $p++) {
+                if ($p -eq $currentRow.Page) {
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -le $currentRow.Y -and $_.Y -gt 50
+                    }
+                } elseif ($p -eq $nextRow.Page) {
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -gt $nextRow.Y
+                    }
+                } else {
+                    $rowChunks += $chunks | Where-Object {
+                        $_.Page -eq $p -and $_.Y -lt 500 -and $_.Y -gt 50
+                    }
+                }
+            }
+        }
+    } else {
+        # Fall 2: Letzte Zeile
+        $rowChunks = $chunks | Where-Object {
+            ($_.Page -eq $currentRow.Page -and $_.Y -le $currentRow.Y) -or
+            ($_.Page -gt $currentRow.Page -and $_.Y -gt 50 -and $_.Y -lt 500)
+        }
     }
 
     # Sammle Zellinhalte
@@ -384,20 +462,13 @@ for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
         $col = $columns[$c]
         $colChunks = $rowChunks | Where-Object {
             $_.X -ge $col.XStart -and $_.X -lt $col.XEnd
-        } | Sort-Object @{Expression="Y"; Descending=$true}, X
+        } | Sort-Object Page, @{Expression="Y"; Descending=$true}, X
 
-        # INTELLIGENTES Zusammenfuegen
-        $cellText = ""
-        $lastY = $null
-        foreach ($chunk in $colChunks) {
-            if ($lastY -ne $null -and [Math]::Abs($chunk.Y - $lastY) -gt 1.0) {
-                $cellText += " "
-            }
-            $cellText += $chunk.Text
-            $lastY = $chunk.Y
-        }
+        # Join ohne Leerzeichen, dann normalisieren
+        $cellText = ($colChunks | Select-Object -ExpandProperty Text) -join ""
+        $cellText = $cellText -replace "\s+", " "
 
-        # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile Footer-Bestandteile entfernen
+        # RETROSPEKTIVE BEREINIGUNG: Nur bei der LETZTEN Tabellenzeile
         $finalCellText = $cellText.Trim()
         if ($i -eq ($tableRowStarts.Count - 1)) {
             $finalCellText = Clean-FooterFromCell -cellText $finalCellText -columnName $col.Name
