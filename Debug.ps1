@@ -207,14 +207,12 @@ function Clean-FooterFromCell {
         $cleaned = $cleaned -replace "\s+\d{4}-\d{2}-\d{2}\s*$", ""
     }
 
-    # Group-Spalte: Entferne Zeitstempel-Fragmente (HH:MM oder HH:MM:SS)
+    # Group-Spalte: Schneide nach bekannten Gruppennamen ab
     if ($columnName -eq "Group") {
-        # Entferne " HH:MM:SS" am Ende
-        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\d{2}\s*$", ""
-        # Entferne " HH:MM:" am Ende (mit abschliessendem Doppelpunkt)
-        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}:\s*$", ""
-        # Entferne " HH:MM" am Ende
-        $cleaned = $cleaned -replace "\s+\d{1,2}:\d{2}\s*$", ""
+        # Finde den ersten passenden Gruppennamen und schneide dort ab
+        if ($cleaned -match "(ICPMHAdmin|ICPMHOperators|ICPMHManagers|ASnT)") {
+            $cleaned = $matches[1]
+        }
     }
 
     # Time-Spalte: Entferne alles NACH dem ersten GMT±HH:MM
