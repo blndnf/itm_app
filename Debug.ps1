@@ -209,9 +209,15 @@ function Clean-FooterFromCell {
 
     # Group-Spalte: Schneide nach bekannten Gruppennamen ab
     if ($columnName -eq "Group") {
+        # DEBUG: Zeige Original-Text
+        $script:cleaningLog += "  [Group DEBUG] Original: '$cleaned' (Länge: $($cleaned.Length))`n"
+
         # Finde den ersten passenden Gruppennamen und schneide dort ab
         if ($cleaned -match "(ICPMHAdmin|ICPMHOperators|ICPMHManagers|ASnT)") {
             $cleaned = $matches[1]
+            $script:cleaningLog += "  [Group DEBUG] MATCH gefunden: '$($matches[1])'`n"
+        } else {
+            $script:cleaningLog += "  [Group DEBUG] KEIN MATCH für Gruppennamen-Pattern`n"
         }
     }
 
