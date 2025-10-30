@@ -96,51 +96,54 @@ $UserName = $env:USERNAME
 function Get-PdfTextChunks {
     param($pdfPath)
     $reader = New-Object iTextSharp.text.pdf.PdfReader -ArgumentList $pdfPath
-    $allChunks = @()
-    
+    # OPTIMIERUNG: ArrayList statt Array += (bis zu 10x schneller bei vielen Seiten!)
+    $allChunks = [System.Collections.ArrayList]::new()
+
     for ($i = 1; $i -le $reader.NumberOfPages; $i++) {
         $strategy = New-Object CoordinateTextExtractionStrategy
         [void][iTextSharp.text.pdf.parser.PdfTextExtractor]::GetTextFromPage($reader, $i, $strategy)
-        
+
         foreach ($chunk in $strategy.TextChunks) {
-            $allChunks += [pscustomobject]@{
+            [void]$allChunks.Add([pscustomobject]@{
                 Page = $i
                 X = $chunk.X
                 Y = $chunk.Y
                 Text = $chunk.Text
-            }
+            })
         }
     }
-    
+
     $reader.Close()
-    return $allChunks
+    return $allChunks.ToArray()
 }
 
 # Gruppiere Chunks nach Y-Position (physische Zeilen)
 function Group-ChunksByY {
     param($chunks, $yTolerance = 0.5)
-    
+
+    # OPTIMIERUNG: ArrayList für jede Y-Gruppe (verhindert += Array-Kopien)
     $yGroups = @{}
-    
+
     foreach ($chunk in $chunks) {
         $y = $chunk.Y
         $foundGroup = $false
-        
+
         # Suche existierende Y-Gruppe
         foreach ($existingY in $yGroups.Keys) {
             if ([Math]::Abs($y - $existingY) -lt $yTolerance) {
-                $yGroups[$existingY] += $chunk
+                [void]$yGroups[$existingY].Add($chunk)
                 $foundGroup = $true
                 break
             }
         }
-        
-        # Neue Gruppe erstellen
+
+        # Neue Gruppe erstellen (als ArrayList)
         if (-not $foundGroup) {
-            $yGroups[$y] = @($chunk)
+            $yGroups[$y] = [System.Collections.ArrayList]::new()
+            [void]$yGroups[$y].Add($chunk)
         }
     }
-    
+
     return $yGroups
 }
 
@@ -247,13 +250,32 @@ function Parse-AuditEntries {
 
     # 3. Finde Tabellenzeilen-Starts (UEBER ALLE SEITEN)
     # User-Eintrag markiert neue Tabellenzeile
-    $tableRowStarts = @()  # Array of [pscustomobject]@{Page=X; Y=Y}
+    # OPTIMIERUNG: ArrayList statt Array += (viel schneller!)
+    $tableRowStarts = [System.Collections.ArrayList]::new()
     $userCol = $columns[0]
     $groupCol = $columns[1]
 
+    # OPTIMIERUNG: Cache Chunks nach Seite (verhindert wiederholte Where-Object Durchläufe)
+    Write-Host "Bereite Seiten-Cache vor..."
+    $chunksPerPage = @{}
+    $pageYGroupsCache = @{}
+    foreach ($chunk in $chunks) {
+        if (-not $chunksPerPage.ContainsKey($chunk.Page)) {
+            $chunksPerPage[$chunk.Page] = [System.Collections.ArrayList]::new()
+        }
+        [void]$chunksPerPage[$chunk.Page].Add($chunk)
+    }
+
     for ($pageNum = 1; $pageNum -le $totalPages; $pageNum++) {
-        $pageChunks = $chunks | Where-Object { $_.Page -eq $pageNum }
-        $pageYGroups = Group-ChunksByY -chunks $pageChunks
+        # Verwende gecachte Chunks statt Where-Object
+        $pageChunks = $chunksPerPage[$pageNum]
+        if (-not $pageChunks) { continue }
+
+        # Cache Y-Gruppen pro Seite
+        if (-not $pageYGroupsCache.ContainsKey($pageNum)) {
+            $pageYGroupsCache[$pageNum] = Group-ChunksByY -chunks $pageChunks
+        }
+        $pageYGroups = $pageYGroupsCache[$pageNum]
 
         foreach ($y in ($pageYGroups.Keys | Sort-Object -Descending)) {
             # Auf Seite 1: Ueberspringe Header-Bereich
@@ -274,7 +296,7 @@ function Parse-AuditEntries {
                 $groupText = ($groupChunks | Select-Object -ExpandProperty Text) -join ""
 
                 if ($groupText -match "ICPMH") {
-                    $tableRowStarts += [pscustomobject]@{ Page=$pageNum; Y=$y }
+                    [void]$tableRowStarts.Add([pscustomobject]@{ Page=$pageNum; Y=$y })
                 }
             }
         }
@@ -290,48 +312,66 @@ function Parse-AuditEntries {
     }
     
     # 4. Fuer jede Tabellenzeile: Extrahiere Zellen (MULTI-PAGE)
-    $entries = @()
+    # OPTIMIERUNG: ArrayList statt Array
+    $entries = [System.Collections.ArrayList]::new()
 
+    Write-Host "Extrahiere Zellinhalte..."
     for ($i = 0; $i -lt $tableRowStarts.Count; $i++) {
         $currentRow = $tableRowStarts[$i]
         $nextRow = if ($i+1 -lt $tableRowStarts.Count) { $tableRowStarts[$i+1] } else { $null }
 
-        # Sammle Chunks: Von currentRow bis nextRow (über Seiten hinweg)
-        $rowChunks = @()
+        # OPTIMIERUNG: Sammle Chunks aus Cache statt Where-Object auf allen Chunks
+        $rowChunks = [System.Collections.ArrayList]::new()
         if ($nextRow) {
             # Fall 1: Es gibt eine nächste Zeile
             if ($currentRow.Page -eq $nextRow.Page) {
-                # Gleiche Seite: Einfacher Y-Bereich
-                $rowChunks = $chunks | Where-Object {
-                    $_.Page -eq $currentRow.Page -and
-                    $_.Y -le $currentRow.Y -and $_.Y -gt $nextRow.Y
+                # Gleiche Seite: Einfacher Y-Bereich (verwende gecachte Page-Chunks)
+                foreach ($chunk in $chunksPerPage[$currentRow.Page]) {
+                    if ($chunk.Y -le $currentRow.Y -and $chunk.Y -gt $nextRow.Y) {
+                        [void]$rowChunks.Add($chunk)
+                    }
                 }
             } else {
-                # Mehrere Seiten
+                # Mehrere Seiten (verwende gecachte Page-Chunks)
                 for ($p = $currentRow.Page; $p -le $nextRow.Page; $p++) {
-                    if ($p -eq $currentRow.Page) {
-                        # Start-Seite: Ab currentRow.Y nach unten
-                        $rowChunks += $chunks | Where-Object {
-                            $_.Page -eq $p -and $_.Y -le $currentRow.Y -and $_.Y -gt 50
-                        }
-                    } elseif ($p -eq $nextRow.Page) {
-                        # End-Seite: Von oben bis nextRow.Y
-                        $rowChunks += $chunks | Where-Object {
-                            $_.Page -eq $p -and $_.Y -gt $nextRow.Y
-                        }
-                    } else {
-                        # Zwischenseite: Alles außer Header/Footer
-                        $rowChunks += $chunks | Where-Object {
-                            $_.Page -eq $p -and $_.Y -lt 500 -and $_.Y -gt 50
+                    if (-not $chunksPerPage.ContainsKey($p)) { continue }
+
+                    foreach ($chunk in $chunksPerPage[$p]) {
+                        if ($p -eq $currentRow.Page) {
+                            # Start-Seite: Ab currentRow.Y nach unten
+                            if ($chunk.Y -le $currentRow.Y -and $chunk.Y -gt 50) {
+                                [void]$rowChunks.Add($chunk)
+                            }
+                        } elseif ($p -eq $nextRow.Page) {
+                            # End-Seite: Von oben bis nextRow.Y
+                            if ($chunk.Y -gt $nextRow.Y) {
+                                [void]$rowChunks.Add($chunk)
+                            }
+                        } else {
+                            # Zwischenseite: Alles außer Header/Footer
+                            if ($chunk.Y -lt 500 -and $chunk.Y -gt 50) {
+                                [void]$rowChunks.Add($chunk)
+                            }
                         }
                     }
                 }
             }
         } else {
-            # Fall 2: Letzte Zeile im Dokument
-            $rowChunks = $chunks | Where-Object {
-                ($_.Page -eq $currentRow.Page -and $_.Y -le $currentRow.Y) -or
-                ($_.Page -gt $currentRow.Page -and $_.Y -gt 50 -and $_.Y -lt 500)
+            # Fall 2: Letzte Zeile im Dokument (verwende gecachte Page-Chunks)
+            for ($p = $currentRow.Page; $p -le $totalPages; $p++) {
+                if (-not $chunksPerPage.ContainsKey($p)) { continue }
+
+                foreach ($chunk in $chunksPerPage[$p]) {
+                    if ($p -eq $currentRow.Page) {
+                        if ($chunk.Y -le $currentRow.Y) {
+                            [void]$rowChunks.Add($chunk)
+                        }
+                    } else {
+                        if ($chunk.Y -gt 50 -and $chunk.Y -lt 500) {
+                            [void]$rowChunks.Add($chunk)
+                        }
+                    }
+                }
             }
         }
 
@@ -378,26 +418,28 @@ function Parse-AuditEntries {
             elseif ($col.Name -eq "Action") { $entry.Action = $finalCellText }
             elseif ($col.Name -match "Error") { $entry.ErrorMessage = $finalCellText }
         }
-        
-        $entries += [pscustomobject]$entry
+
+        # OPTIMIERUNG: .Add() statt +=
+        [void]$entries.Add([pscustomobject]$entry)
     }
-    
-    return $entries
+
+    return $entries.ToArray()
 }
 
 # Hauptlogik
 Write-Host "Analysiere PDFs..."
-$allFindings = @()
+# OPTIMIERUNG: ArrayList statt Array
+$allFindings = [System.Collections.ArrayList]::new()
 
 foreach ($pdf in $pdfFiles) {
     Write-Host ""
     Write-Host "======================================"
     Write-Host "PDF: $($pdf.Name)"
     Write-Host "======================================"
-    
+
     $chunks = Get-PdfTextChunks -pdfPath $pdf.FullName
     $entries = Parse-AuditEntries -chunks $chunks -pdfName $pdf.Name
-    
+
     Write-Host "Gefundene Eintraege: $($entries.Count)"
 
     # DEBUG: Zeige erste 3 Eintraege
@@ -421,10 +463,11 @@ foreach ($pdf in $pdfFiles) {
                        ($e.Reason -ne "Autogenerated")
 
         if ($groupMatch -and $reasonValid) {
-            $allFindings += $e
+            # OPTIMIERUNG: .Add() statt +=
+            [void]$allFindings.Add($e)
         }
     }
-    
+
     $pdfHits = ($allFindings | Where-Object { $_.SourcePDF -eq $pdf.Name }).Count
     Write-Host "Relevante Findings: $pdfHits"
 }
