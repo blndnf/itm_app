@@ -314,7 +314,10 @@ class PaletteExtractor:
                 cx, cy = int(cx), int(cy)
 
                 # Determine text color based on background luminance
-                text_color = get_text_color_for_background(color_tuple)
+                # Convert numpy types to Python int for OpenCV compatibility
+                color_int = (int(color_tuple[0]), int(color_tuple[1]), int(color_tuple[2]))
+                tc = get_text_color_for_background(color_int)
+                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
                 # Calculate font scale based on region size
                 font_scale = min(1.0, max(0.4, area / 10000))
@@ -368,20 +371,27 @@ class PaletteExtractor:
         num_colors = len(colors)
         rows = (num_colors + cols - 1) // cols
 
-        # Calculate dimensions
-        text_height = 20 if show_name else 0
+        # Calculate dimensions - scale proportionally to swatch_size
+        # Base reference: swatch_size=60 with text_height=20, margin=2, font_scale=0.6/0.3
+        scale_factor = swatch_size / 60.0
+        text_height = int(160 * scale_factor) if show_name else 0
+        margin = max(2, int(2 * scale_factor))
         cell_height = swatch_size + text_height
         cell_width = swatch_size
 
         # Add space for grayscale section if provided
         gray_section_height = 0
+        separator_gap = int(80 * scale_factor)  # Gap for separator
         if grayscales:
-            gray_section_height = swatch_size + text_height + 20  # 20px separator
+            gray_section_height = swatch_size + text_height + separator_gap
 
         # Create image with dark gray background
         width = cols * cell_width
         height = rows * cell_height + gray_section_height
         palette_img = np.ones((height, width, 3), dtype=np.uint8) * 50  # Dark gray bg
+
+        # Pre-calculate border thickness for swatches
+        border_thickness = max(1, int(scale_factor))
 
         # Draw color swatches
         for i, color_info in enumerate(colors):
@@ -393,28 +403,33 @@ class PaletteExtractor:
 
             # Draw color swatch
             r, g, b = color_info.rgb
+            # Convert to Python int for OpenCV compatibility
+            color_tuple = (int(r), int(g), int(b))
             cv2.rectangle(
                 palette_img,
-                (x + 2, y + 2),
-                (x + swatch_size - 2, y + swatch_size - 2),
-                (r, g, b),
+                (x + margin, y + margin),
+                (x + swatch_size - margin, y + swatch_size - margin),
+                color_tuple,
                 -1,
             )
             # Draw border
             cv2.rectangle(
                 palette_img,
-                (x + 2, y + 2),
-                (x + swatch_size - 2, y + swatch_size - 2),
+                (x + margin, y + margin),
+                (x + swatch_size - margin, y + swatch_size - margin),
                 (100, 100, 100),
-                1,
+                border_thickness,
             )
 
             # Draw number on swatch
             if show_number:
-                text_color = get_text_color_for_background((r, g, b))
+                tc = get_text_color_for_background((r, g, b))
+                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 number_text = str(color_info.index)
+                num_font_scale = 0.6 * scale_factor
+                num_thickness = max(2, int(2 * scale_factor))
                 (tw, th), _ = cv2.getTextSize(
-                    number_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                    number_text, cv2.FONT_HERSHEY_SIMPLEX, num_font_scale, num_thickness
                 )
                 num_x = x + (swatch_size - tw) // 2
                 num_y = y + (swatch_size + th) // 2
@@ -423,28 +438,27 @@ class PaletteExtractor:
                     number_text,
                     (num_x, num_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
+                    num_font_scale,
                     text_color,
-                    2,
+                    num_thickness,
                     cv2.LINE_AA,
                 )
 
             # Draw name below swatch
             if show_name:
-                # Truncate name if too long
                 name = color_info.name
-                if len(name) > 12:
-                    name = name[:11] + "…"
-                text_x = x + 3
-                text_y = y + swatch_size + 14
+                name_font_scale = 2.0 * scale_factor
+                name_thickness = max(1, int(2 * scale_factor))
+                text_x = x + int(10 * scale_factor)
+                text_y = y + swatch_size + int(100 * scale_factor)
                 cv2.putText(
                     palette_img,
                     name,
                     (text_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.3,
+                    name_font_scale,
                     (220, 220, 220),
-                    1,
+                    name_thickness,
                     cv2.LINE_AA,
                 )
 
@@ -452,44 +466,50 @@ class PaletteExtractor:
         if grayscales:
             from utils.color_naming import int_to_roman
 
-            separator_y = rows * cell_height + 10
+            separator_y = rows * cell_height + int(40 * scale_factor)
+            line_thickness = max(1, int(scale_factor))
+            line_margin = int(5 * scale_factor)
             # Draw separator line
             cv2.line(
                 palette_img,
-                (5, separator_y),
-                (width - 5, separator_y),
+                (line_margin, separator_y),
+                (width - line_margin, separator_y),
                 (100, 100, 100),
-                1,
+                line_thickness,
             )
 
-            gray_y = separator_y + 10
+            gray_y = separator_y + int(40 * scale_factor)
             num_grays = len(grayscales)
-            gray_swatch_width = min(swatch_size, (width - 10) // num_grays)
+            gray_swatch_width = min(swatch_size, (width - 2 * line_margin) // num_grays)
 
             for i, gray_val in enumerate(grayscales):
-                gx = 5 + i * gray_swatch_width
+                gx = line_margin + i * gray_swatch_width
+                gv = int(gray_val)  # Convert to Python int for OpenCV
 
                 # Draw gray swatch
                 cv2.rectangle(
                     palette_img,
-                    (gx + 2, gray_y + 2),
-                    (gx + gray_swatch_width - 2, gray_y + swatch_size - 2),
-                    (gray_val, gray_val, gray_val),
+                    (gx + margin, gray_y + margin),
+                    (gx + gray_swatch_width - margin, gray_y + swatch_size - margin),
+                    (gv, gv, gv),
                     -1,
                 )
                 cv2.rectangle(
                     palette_img,
-                    (gx + 2, gray_y + 2),
-                    (gx + gray_swatch_width - 2, gray_y + swatch_size - 2),
+                    (gx + margin, gray_y + margin),
+                    (gx + gray_swatch_width - margin, gray_y + swatch_size - margin),
                     (100, 100, 100),
-                    1,
+                    border_thickness,
                 )
 
                 # Draw Roman numeral
-                text_color = get_text_color_for_background((gray_val, gray_val, gray_val))
+                tc = get_text_color_for_background((gv, gv, gv))
+                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 roman = int_to_roman(i + 1)
+                gray_font_scale = 0.5 * scale_factor
+                gray_thickness = max(1, int(scale_factor))
                 (tw, th), _ = cv2.getTextSize(
-                    roman, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                    roman, cv2.FONT_HERSHEY_SIMPLEX, gray_font_scale, gray_thickness
                 )
                 rx = gx + (gray_swatch_width - tw) // 2
                 ry = gray_y + (swatch_size + th) // 2
@@ -498,9 +518,9 @@ class PaletteExtractor:
                     roman,
                     (rx, ry),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
+                    gray_font_scale,
                     text_color,
-                    1,
+                    gray_thickness,
                     cv2.LINE_AA,
                 )
 

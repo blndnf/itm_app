@@ -114,7 +114,9 @@ class ShadeQuantizer:
                 cx, cy = int(cx), int(cy)
 
                 # Determine text color (white on dark, black on light)
-                text_color = get_text_color_for_background((level, level, level))
+                lv = int(level)  # Convert to Python int for OpenCV
+                tc = get_text_color_for_background((lv, lv, lv))
+                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
                 # Calculate font scale based on region size
                 font_scale = min(0.8, max(0.4, area / 15000))

@@ -112,9 +112,12 @@ class ProcessingWorker(QThread):
                 results["outlines"] = outline_extractor.extract(working_image)
 
             # Create combined palette image with grayscales
+            # High resolution: 1440px on short side (3 cols * 480px = 1440px)
             self.progress.emit("Erstelle Palettenbild...")
             results["palette"] = palette_extractor.create_palette_image(
                 results["colors"],
+                swatch_size=480,
+                cols=3,
                 show_name=True,
                 show_number=opts.add_numbers,
                 grayscales=results["grayscale_levels"],
@@ -511,6 +514,10 @@ class MainWindow(QMainWindow):
             ("posterized", self._posterized_panel.get_image(), False),
             ("palette", self._palette_panel.get_image(), True),
         ]
+
+        # Add abstracted image if available
+        if self._abstracted_image is not None:
+            result_map.insert(0, ("abstracted", self._abstracted_image, True))
 
         for name, image, is_rgb in result_map:
             if image is not None:
