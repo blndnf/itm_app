@@ -21,11 +21,32 @@ import os
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon
 
-from gui.main_window import MainWindow
+def check_dependencies() -> list[str]:
+    """Check if all required dependencies are installed."""
+    missing = []
+
+    try:
+        import numpy
+    except ImportError:
+        missing.append("numpy")
+
+    try:
+        import cv2
+    except ImportError:
+        missing.append("opencv-python")
+
+    try:
+        import sklearn
+    except ImportError:
+        missing.append("scikit-learn")
+
+    try:
+        from PyQt6 import QtWidgets
+    except ImportError:
+        missing.append("PyQt6")
+
+    return missing
 
 
 def main() -> int:
@@ -35,6 +56,28 @@ def main() -> int:
     Returns:
         Exit code (0 for success, non-zero for error).
     """
+    # Check dependencies first
+    missing = check_dependencies()
+    if missing:
+        print("=" * 60)
+        print("FEHLER: Fehlende Abhängigkeiten!")
+        print("=" * 60)
+        print("\nBitte installieren Sie die folgenden Pakete:\n")
+        for pkg in missing:
+            print(f"  - {pkg}")
+        print("\nFühren Sie diesen Befehl aus:")
+        print(f"\n  pip install {' '.join(missing)}")
+        print("\nOder installieren Sie alle Abhängigkeiten:")
+        print("\n  pip install -r requirements.txt")
+        print("\n" + "=" * 60)
+        input("\nDrücken Sie Enter zum Beenden...")
+        return 1
+
+    # Import after dependency check
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import Qt
+    from gui.main_window import MainWindow
+
     # Enable high DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -122,4 +165,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print("\n" + "=" * 60)
+        print("FEHLER beim Starten der Anwendung:")
+        print("=" * 60)
+        print(f"\n{type(e).__name__}: {e}")
+        print("\n" + "=" * 60)
+        input("\nDrücken Sie Enter zum Beenden...")
+        sys.exit(1)

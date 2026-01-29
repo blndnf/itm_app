@@ -102,8 +102,13 @@ class ImagePreview(QWidget):
 
         # Scale to fit while maintaining aspect ratio
         pixmap = QPixmap.fromImage(qimage)
+        margin = self._scroll_area.contentsMargins().left() * 2
+        available_size = self._scroll_area.size()
+        target_width = max(100, available_size.width() - margin)
+        target_height = max(100, available_size.height() - margin)
         scaled_pixmap = pixmap.scaled(
-            self._scroll_area.size() - self._scroll_area.contentsMargins().left() * 2,
+            target_width,
+            target_height,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
