@@ -92,22 +92,35 @@ def main() -> int:
     # Set application style
     app.setStyle("Fusion")
 
-    # Apply dark-friendly stylesheet
+    # Apply dark theme stylesheet
     stylesheet = """
+        * {
+            color: #e0e0e0;
+        }
         QMainWindow {
-            background-color: #f5f5f5;
+            background-color: #2d2d2d;
+        }
+        QWidget {
+            background-color: #2d2d2d;
         }
         QGroupBox {
             font-weight: bold;
-            border: 1px solid #ccc;
+            border: 1px solid #555;
             border-radius: 5px;
             margin-top: 10px;
             padding-top: 10px;
+            background-color: #383838;
+            color: #e0e0e0;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
             subcontrol-position: top left;
             padding: 0 5px;
+            color: #e0e0e0;
+        }
+        QLabel {
+            color: #e0e0e0;
+            background-color: transparent;
         }
         QPushButton {
             background-color: #4a90d9;
@@ -124,12 +137,12 @@ def main() -> int:
             background-color: #3a80c9;
         }
         QPushButton:disabled {
-            background-color: #cccccc;
+            background-color: #555555;
             color: #888888;
         }
         QSlider::groove:horizontal {
             height: 6px;
-            background: #ddd;
+            background: #555;
             border-radius: 3px;
         }
         QSlider::handle:horizontal {
@@ -143,15 +156,61 @@ def main() -> int:
         }
         QSpinBox {
             padding: 4px;
-            border: 1px solid #ccc;
+            border: 1px solid #555;
             border-radius: 3px;
+            background-color: #383838;
+            color: #e0e0e0;
+        }
+        QComboBox {
+            padding: 4px;
+            border: 1px solid #555;
+            border-radius: 3px;
+            background-color: #383838;
+            color: #e0e0e0;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #383838;
+            color: #e0e0e0;
+            selection-background-color: #4a90d9;
+        }
+        QCheckBox {
+            color: #e0e0e0;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #555;
+            border-radius: 3px;
+            background-color: #383838;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #4a90d9;
         }
         QStatusBar {
-            background-color: #e0e0e0;
+            background-color: #252525;
+            color: #e0e0e0;
         }
         QScrollArea {
-            border: 1px solid #ccc;
+            border: 1px solid #555;
             border-radius: 3px;
+            background-color: #383838;
+        }
+        QSplitter::handle {
+            background-color: #555;
+        }
+        QProgressBar {
+            border: 1px solid #555;
+            border-radius: 3px;
+            background-color: #383838;
+            text-align: center;
+            color: #e0e0e0;
+        }
+        QProgressBar::chunk {
+            background-color: #4a90d9;
+            border-radius: 2px;
         }
     """
     app.setStyleSheet(stylesheet)

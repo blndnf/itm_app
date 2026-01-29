@@ -15,9 +15,13 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QCheckBox,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
+
+from processing.abstraction import AbstractionMethod
 
 
 class ImagePreview(QWidget):
@@ -49,7 +53,7 @@ class ImagePreview(QWidget):
         self._image_label = QLabel()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setStyleSheet(
-            "background-color: #f0f0f0; border: 1px solid #ccc;"
+            "background-color: #383838; border: 1px solid #555; color: #888;"
         )
         self._image_label.setText("Kein Bild")
         self._image_label.setSizePolicy(
@@ -320,3 +324,97 @@ class ResultPanel(QWidget):
     def get_result_type(self) -> str:
         """Get the result type identifier."""
         return self._result_type
+
+
+class AbstractionSettingsPanel(QWidget):
+    """Panel for image abstraction/pre-processing settings."""
+
+    settings_changed = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._setup_ui()
+        self._connect_signals()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Abstraction group
+        group = QGroupBox("Vorverarbeitung (Abstraktion)")
+        group_layout = QVBoxLayout(group)
+
+        # Enable checkbox
+        self._enabled_checkbox = QCheckBox("Vorverarbeitung aktivieren")
+        self._enabled_checkbox.setChecked(False)
+        group_layout.addWidget(self._enabled_checkbox)
+
+        # Method selection
+        method_layout = QHBoxLayout()
+        method_layout.addWidget(QLabel("Methode:"))
+
+        self._method_combo = QComboBox()
+        self._method_combo.addItem("Bilateral Filter", AbstractionMethod.BILATERAL)
+        self._method_combo.addItem("Pixelierung", AbstractionMethod.PIXELATE)
+        self._method_combo.addItem("Mean Shift", AbstractionMethod.MEAN_SHIFT)
+        self._method_combo.addItem("K-Means Farben", AbstractionMethod.KMEANS)
+        self._method_combo.setEnabled(False)
+
+        method_layout.addWidget(self._method_combo)
+        group_layout.addLayout(method_layout)
+
+        # Detail level slider
+        detail_layout = QHBoxLayout()
+        detail_layout.addWidget(QLabel("Detail:"))
+
+        self._detail_slider = QSlider(Qt.Orientation.Horizontal)
+        self._detail_slider.setRange(1, 10)
+        self._detail_slider.setValue(5)
+        self._detail_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._detail_slider.setTickInterval(1)
+        self._detail_slider.setEnabled(False)
+
+        self._detail_label = QLabel("5")
+        self._detail_label.setMinimumWidth(20)
+
+        detail_layout.addWidget(QLabel("1"))
+        detail_layout.addWidget(self._detail_slider)
+        detail_layout.addWidget(QLabel("10"))
+        detail_layout.addWidget(self._detail_label)
+
+        group_layout.addLayout(detail_layout)
+
+        # Help text
+        help_label = QLabel("1 = stark abstrahiert, 10 = fast original")
+        help_label.setStyleSheet("color: #888; font-size: 10px;")
+        group_layout.addWidget(help_label)
+
+        layout.addWidget(group)
+
+    def _connect_signals(self) -> None:
+        self._enabled_checkbox.toggled.connect(self._on_enabled_changed)
+        self._method_combo.currentIndexChanged.connect(
+            lambda: self.settings_changed.emit()
+        )
+        self._detail_slider.valueChanged.connect(self._on_detail_changed)
+
+    def _on_enabled_changed(self, enabled: bool) -> None:
+        self._method_combo.setEnabled(enabled)
+        self._detail_slider.setEnabled(enabled)
+        self.settings_changed.emit()
+
+    def _on_detail_changed(self, value: int) -> None:
+        self._detail_label.setText(str(value))
+        self.settings_changed.emit()
+
+    def is_enabled(self) -> bool:
+        """Check if abstraction is enabled."""
+        return self._enabled_checkbox.isChecked()
+
+    def get_method(self) -> AbstractionMethod:
+        """Get the selected abstraction method."""
+        return self._method_combo.currentData()
+
+    def get_detail_level(self) -> int:
+        """Get the detail level (1-10)."""
+        return self._detail_slider.value()

@@ -15,19 +15,24 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QProgressBar,
-    QApplication,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from gui.widgets import ImagePreview, SettingsPanel, ResultPanel
+from gui.widgets import (
+    ImagePreview,
+    SettingsPanel,
+    ResultPanel,
+    AbstractionSettingsPanel,
+)
 from processing.outlines import OutlineExtractor
 from processing.shades import ShadeQuantizer
 from processing.palette import PaletteExtractor
+from processing.abstraction import ImageAbstractor, AbstractionSettings
 from utils.image_io import ImageIO
 
 
 class ProcessingWorker(QThread):
-    """Worker thread for image processing."""
+    """Worker thread for image processing including abstraction."""
 
     finished = pyqtSignal(dict)
     progress = pyqtSignal(str)
@@ -39,35 +44,47 @@ class ProcessingWorker(QThread):
         num_values: int,
         num_colors: int,
         edge_sensitivity: float,
+        abstraction_settings: Optional[AbstractionSettings] = None,
     ):
         super().__init__()
         self.image = image
         self.num_values = num_values
         self.num_colors = num_colors
         self.edge_sensitivity = edge_sensitivity
+        self.abstraction_settings = abstraction_settings
 
     def run(self) -> None:
         try:
             results = {}
 
+            # Apply abstraction if enabled
+            if self.abstraction_settings and self.abstraction_settings.enabled:
+                self.progress.emit("Wende Vorverarbeitung an...")
+                abstractor = ImageAbstractor(self.abstraction_settings)
+                working_image = abstractor.abstract(self.image)
+                results["abstracted"] = working_image
+            else:
+                working_image = self.image
+                results["abstracted"] = None
+
             # Process outlines
             self.progress.emit("Extrahiere Konturen...")
             outline_extractor = OutlineExtractor()
             outline_extractor.set_sensitivity(self.edge_sensitivity)
-            results["outlines"] = outline_extractor.extract(self.image)
+            results["outlines"] = outline_extractor.extract(working_image)
 
             # Process shades
             self.progress.emit("Quantisiere Graustufen...")
             shade_quantizer = ShadeQuantizer()
             shade_quantizer.set_num_values(self.num_values)
-            results["shades"] = shade_quantizer.quantize(self.image)
+            results["shades"] = shade_quantizer.quantize(working_image)
 
             # Process palette
             self.progress.emit("Extrahiere Farbpalette...")
             palette_extractor = PaletteExtractor()
             palette_extractor.set_num_colors(self.num_colors)
-            results["colors"] = palette_extractor.extract_palette(self.image)
-            results["posterized"] = palette_extractor.create_posterized_image(self.image)
+            results["colors"] = palette_extractor.extract_palette(working_image)
+            results["posterized"] = palette_extractor.create_posterized_image(working_image)
             results["palette"] = palette_extractor.create_palette_image(results["colors"])
 
             self.finished.emit(results)
@@ -82,9 +99,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._source_image: Optional[np.ndarray] = None
+        self._abstracted_image: Optional[np.ndarray] = None
+        self._show_abstracted: bool = False
         self._results: dict = {}
         self._worker: Optional[ProcessingWorker] = None
         self._current_file_path: Optional[str] = None
+        self._settings_changed_since_process: bool = False
 
         self._setup_ui()
         self._connect_signals()
@@ -111,7 +131,23 @@ class MainWindow(QMainWindow):
         self._process_button.setEnabled(False)
         toolbar_layout.addWidget(self._process_button)
 
+        self._update_button = QPushButton("Aktualisieren")
+        self._update_button.setMinimumWidth(120)
+        self._update_button.setEnabled(False)
+        self._update_button.setToolTip(
+            "Wendet geänderte Einstellungen auf das Bild an"
+        )
+        toolbar_layout.addWidget(self._update_button)
+
         toolbar_layout.addStretch()
+
+        self._toggle_preview_button = QPushButton("Zeige: Original")
+        self._toggle_preview_button.setMinimumWidth(140)
+        self._toggle_preview_button.setEnabled(False)
+        self._toggle_preview_button.setToolTip(
+            "Wechselt zwischen Original und vorverarbeitetem Bild"
+        )
+        toolbar_layout.addWidget(self._toggle_preview_button)
 
         self._save_all_button = QPushButton("Alle speichern")
         self._save_all_button.setMinimumWidth(120)
@@ -130,6 +166,11 @@ class MainWindow(QMainWindow):
         self._source_preview = ImagePreview("Quellbild")
         left_layout.addWidget(self._source_preview, stretch=2)
 
+        # Abstraction settings panel (new)
+        self._abstraction_panel = AbstractionSettingsPanel()
+        left_layout.addWidget(self._abstraction_panel)
+
+        # Analysis settings panel
         self._settings_panel = SettingsPanel()
         left_layout.addWidget(self._settings_panel)
 
@@ -182,12 +223,39 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._open_button.clicked.connect(self._open_image)
         self._process_button.clicked.connect(self._process_image)
+        self._update_button.clicked.connect(self._process_image)
         self._save_all_button.clicked.connect(self._save_all)
+        self._toggle_preview_button.clicked.connect(self._toggle_preview)
 
         self._outlines_panel.save_requested.connect(self._save_result)
         self._shades_panel.save_requested.connect(self._save_result)
         self._posterized_panel.save_requested.connect(self._save_result)
         self._palette_panel.save_requested.connect(self._save_result)
+
+        # Settings changed signals
+        self._settings_panel.settings_changed.connect(self._on_settings_changed)
+        self._abstraction_panel.settings_changed.connect(self._on_settings_changed)
+
+    def _on_settings_changed(self) -> None:
+        """Handle settings changes."""
+        self._settings_changed_since_process = True
+        # Enable update button if we have results
+        if self._results:
+            self._update_button.setEnabled(True)
+
+    def _toggle_preview(self) -> None:
+        """Toggle between original and abstracted image preview."""
+        if self._abstracted_image is None:
+            return
+
+        self._show_abstracted = not self._show_abstracted
+
+        if self._show_abstracted:
+            self._source_preview.set_image(self._abstracted_image)
+            self._toggle_preview_button.setText("Zeige: Vorverarbeitet")
+        else:
+            self._source_preview.set_image(self._source_image)
+            self._toggle_preview_button.setText("Zeige: Original")
 
     def _open_image(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -201,9 +269,13 @@ class MainWindow(QMainWindow):
             image = ImageIO.load_image(file_path)
             if image is not None:
                 self._source_image = image
+                self._abstracted_image = None
+                self._show_abstracted = False
                 self._current_file_path = file_path
                 self._source_preview.set_image(image)
                 self._process_button.setEnabled(True)
+                self._toggle_preview_button.setEnabled(False)
+                self._toggle_preview_button.setText("Zeige: Original")
                 self._clear_results()
 
                 # Get image info
@@ -219,13 +291,23 @@ class MainWindow(QMainWindow):
                     "Das Bild konnte nicht geladen werden.",
                 )
 
+    def _get_abstraction_settings(self) -> AbstractionSettings:
+        """Get current abstraction settings from UI."""
+        return AbstractionSettings(
+            enabled=self._abstraction_panel.is_enabled(),
+            method=self._abstraction_panel.get_method(),
+            detail_level=self._abstraction_panel.get_detail_level(),
+        )
+
     def _process_image(self) -> None:
         if self._source_image is None:
             return
 
         # Disable UI during processing
         self._process_button.setEnabled(False)
+        self._update_button.setEnabled(False)
         self._open_button.setEnabled(False)
+        self._toggle_preview_button.setEnabled(False)
         self._progress_bar.setRange(0, 0)  # Indeterminate
         self._progress_bar.show()
 
@@ -235,6 +317,7 @@ class MainWindow(QMainWindow):
             self._settings_panel.get_values(),
             self._settings_panel.get_steps(),
             self._settings_panel.get_edge_sensitivity(),
+            self._get_abstraction_settings(),
         )
         self._worker.progress.connect(self._on_processing_progress)
         self._worker.finished.connect(self._on_processing_finished)
@@ -246,6 +329,21 @@ class MainWindow(QMainWindow):
 
     def _on_processing_finished(self, results: dict) -> None:
         self._results = results
+        self._settings_changed_since_process = False
+
+        # Store abstracted image if available
+        if results.get("abstracted") is not None:
+            self._abstracted_image = results["abstracted"]
+            self._toggle_preview_button.setEnabled(True)
+            # Show abstracted image in preview
+            self._show_abstracted = True
+            self._source_preview.set_image(self._abstracted_image)
+            self._toggle_preview_button.setText("Zeige: Vorverarbeitet")
+        else:
+            self._abstracted_image = None
+            self._toggle_preview_button.setEnabled(False)
+            self._show_abstracted = False
+            self._toggle_preview_button.setText("Zeige: Original")
 
         # Display results
         self._outlines_panel.set_image(results["outlines"])
@@ -257,17 +355,30 @@ class MainWindow(QMainWindow):
         self._process_button.setEnabled(True)
         self._open_button.setEnabled(True)
         self._save_all_button.setEnabled(True)
+        self._update_button.setEnabled(False)
         self._progress_bar.hide()
+
+        abstraction_info = ""
+        if self._abstraction_panel.is_enabled():
+            method_name = {
+                "pixelate": "Pixelierung",
+                "bilateral": "Bilateral",
+                "mean_shift": "Mean Shift",
+                "kmeans": "K-Means",
+            }.get(self._abstraction_panel.get_method().value, "")
+            abstraction_info = f" | Vorverarbeitung: {method_name}"
 
         self._status_bar.showMessage(
             f"Verarbeitung abgeschlossen. "
             f"{self._settings_panel.get_values()} Graustufen, "
-            f"{self._settings_panel.get_steps()} Farben."
+            f"{self._settings_panel.get_steps()} Farben"
+            f"{abstraction_info}"
         )
 
     def _on_processing_error(self, error_message: str) -> None:
         self._process_button.setEnabled(True)
         self._open_button.setEnabled(True)
+        self._update_button.setEnabled(self._settings_changed_since_process)
         self._progress_bar.hide()
 
         QMessageBox.critical(
@@ -279,11 +390,15 @@ class MainWindow(QMainWindow):
 
     def _clear_results(self) -> None:
         self._results = {}
+        self._abstracted_image = None
+        self._show_abstracted = False
+        self._settings_changed_since_process = False
         self._outlines_panel.clear()
         self._shades_panel.clear()
         self._posterized_panel.clear()
         self._palette_panel.clear()
         self._save_all_button.setEnabled(False)
+        self._update_button.setEnabled(False)
 
     def _save_result(self, result_type: str) -> None:
         if result_type not in self._results and result_type != "posterized":
