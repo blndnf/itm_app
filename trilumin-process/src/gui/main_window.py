@@ -19,11 +19,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from .widgets import ImagePreview, SettingsPanel, ResultPanel
-from ..processing.outlines import OutlineExtractor
-from ..processing.shades import ShadeQuantizer
-from ..processing.palette import PaletteExtractor
-from ..utils.image_io import ImageIO
+from gui.widgets import ImagePreview, SettingsPanel, ResultPanel
+from processing.outlines import OutlineExtractor
+from processing.shades import ShadeQuantizer
+from processing.palette import PaletteExtractor
+from utils.image_io import ImageIO
 
 
 class ProcessingWorker(QThread):
