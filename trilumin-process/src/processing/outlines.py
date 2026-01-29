@@ -25,6 +25,8 @@ class OutlineSettings:
     use_clahe: bool = True  # Apply CLAHE for contrast enhancement
     clahe_clip_limit: float = 2.0
     clahe_grid_size: int = 8
+    line_thickness: int = 2  # Dilation iterations for thicker lines
+    background_gray: int = 220  # Light gray background (0-255)
 
 
 class OutlineExtractor:
@@ -106,11 +108,21 @@ class OutlineExtractor:
             self.settings.high_threshold,
         )
 
-        # Invert if needed (black lines on white background)
-        if self.settings.invert:
-            edges = cv2.bitwise_not(edges)
+        # Thicken lines if requested
+        if self.settings.line_thickness > 1:
+            kernel = np.ones((3, 3), np.uint8)
+            edges = cv2.dilate(edges, kernel, iterations=self.settings.line_thickness - 1)
 
-        return edges
+        # Create output with light gray background and black lines
+        if self.settings.invert:
+            # Create light gray background
+            bg_value = self.settings.background_gray
+            result = np.full_like(edges, bg_value)
+            # Draw black lines where edges are detected
+            result[edges > 0] = 0
+            return result
+        else:
+            return edges
 
     def extract_with_dilation(
         self,

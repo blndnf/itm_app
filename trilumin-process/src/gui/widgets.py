@@ -1,5 +1,6 @@
 """Custom widgets for Trilumin Process GUI."""
 
+from enum import Enum
 from typing import Optional, Callable
 
 import cv2
@@ -17,12 +18,22 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QCheckBox,
     QComboBox,
+    QLineEdit,
+    QFileDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSettings
 from PyQt6.QtGui import QImage, QPixmap
 
 from processing.abstraction import AbstractionMethod
 from processing.palette import SortMethod
+
+
+class OutlineSource(Enum):
+    """Source for outline extraction."""
+    ORIGINAL = "original"
+    POSTERIZED = "posterized"
+    SHADES = "shades"
+    COMBINED = "combined"
 
 
 class ImagePreview(QWidget):
@@ -213,7 +224,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(edge_group)
 
         # Palette sorting options
-        sort_group = QGroupBox("Paletten-Sortierung")
+        sort_group = QGroupBox("Paletten-Optionen")
         sort_layout = QVBoxLayout(sort_group)
 
         # Sort method
@@ -227,27 +238,69 @@ class SettingsPanel(QWidget):
         method_row.addWidget(self._sort_combo)
         sort_layout.addLayout(method_row)
 
-        # Grays position
-        self._grays_end_checkbox = QCheckBox("Grautöne am Ende")
-        self._grays_end_checkbox.setChecked(True)
-        sort_layout.addWidget(self._grays_end_checkbox)
-
         # Add numbers checkbox
         self._add_numbers_checkbox = QCheckBox("Nummern anzeigen")
         self._add_numbers_checkbox.setChecked(True)
         sort_layout.addWidget(self._add_numbers_checkbox)
 
-        # Outlines from posterized
-        self._outlines_from_posterized = QCheckBox("Konturen aus Posterisierung")
-        self._outlines_from_posterized.setChecked(True)
-        self._outlines_from_posterized.setToolTip(
-            "Erzeugt klarere Konturen bei kontrastarmen Bildern"
-        )
-        sort_layout.addWidget(self._outlines_from_posterized)
-
         layout.addWidget(sort_group)
 
+        # Outline options
+        outline_group = QGroupBox("Konturenerkennung")
+        outline_layout = QVBoxLayout(outline_group)
+
+        # Outline source dropdown
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Quelle:"))
+        self._outline_source_combo = QComboBox()
+        self._outline_source_combo.addItem("Original", OutlineSource.ORIGINAL)
+        self._outline_source_combo.addItem("Posterisiert", OutlineSource.POSTERIZED)
+        self._outline_source_combo.addItem("Graustufen", OutlineSource.SHADES)
+        self._outline_source_combo.addItem("Kombiniert", OutlineSource.COMBINED)
+        self._outline_source_combo.setCurrentIndex(1)  # Default: Posterized
+        self._outline_source_combo.setToolTip(
+            "Original: Konturen aus Originalbild\n"
+            "Posterisiert: Klarere Konturen aus Farbposterisierung\n"
+            "Graustufen: Konturen aus Graustufenbild\n"
+            "Kombiniert: Überlagerung von Posterisiert und Graustufen"
+        )
+        source_row.addWidget(self._outline_source_combo)
+        outline_layout.addLayout(source_row)
+
+        layout.addWidget(outline_group)
+
+        # Folder settings
+        folder_group = QGroupBox("Ordner")
+        folder_layout = QVBoxLayout(folder_group)
+
+        # Source folder
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Quellordner:"))
+        self._source_folder_edit = QLineEdit()
+        self._source_folder_edit.setPlaceholderText("Standard-Ordner zum Öffnen")
+        src_row.addWidget(self._source_folder_edit)
+        self._source_folder_btn = QPushButton("...")
+        self._source_folder_btn.setMaximumWidth(30)
+        src_row.addWidget(self._source_folder_btn)
+        folder_layout.addLayout(src_row)
+
+        # Export folder
+        exp_row = QHBoxLayout()
+        exp_row.addWidget(QLabel("Exportordner:"))
+        self._export_folder_edit = QLineEdit()
+        self._export_folder_edit.setPlaceholderText("Standard-Ordner zum Speichern")
+        exp_row.addWidget(self._export_folder_edit)
+        self._export_folder_btn = QPushButton("...")
+        self._export_folder_btn.setMaximumWidth(30)
+        exp_row.addWidget(self._export_folder_btn)
+        folder_layout.addLayout(exp_row)
+
+        layout.addWidget(folder_group)
+
         layout.addStretch()
+
+        # Load saved settings
+        self._load_settings()
 
     def _connect_signals(self) -> None:
         # Sync sliders and spinboxes
@@ -261,9 +314,12 @@ class SettingsPanel(QWidget):
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
 
         self._sort_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
-        self._grays_end_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
-        self._outlines_from_posterized.toggled.connect(lambda: self.settings_changed.emit())
+        self._outline_source_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
+
+        # Folder browser buttons
+        self._source_folder_btn.clicked.connect(self._browse_source_folder)
+        self._export_folder_btn.clicked.connect(self._browse_export_folder)
 
     def _on_steps_slider_changed(self, value: int) -> None:
         steps_value = value * 3  # Convert to multiple of 3
@@ -307,16 +363,89 @@ class SettingsPanel(QWidget):
         return self._sort_combo.currentData()
 
     def get_grays_position(self) -> str:
-        """Get grays position ('end' or 'mixed')."""
-        return "end" if self._grays_end_checkbox.isChecked() else "mixed"
+        """Get grays position (always 'end')."""
+        return "end"  # Hardcoded as per user request
 
     def should_add_numbers(self) -> bool:
         """Check if numbers should be added to images."""
         return self._add_numbers_checkbox.isChecked()
 
-    def use_posterized_for_outlines(self) -> bool:
-        """Check if outlines should be extracted from posterized image."""
-        return self._outlines_from_posterized.isChecked()
+    def get_outline_source(self) -> OutlineSource:
+        """Get the outline extraction source."""
+        return self._outline_source_combo.currentData()
+
+    def get_source_folder(self) -> str:
+        """Get the source folder path."""
+        return self._source_folder_edit.text()
+
+    def get_export_folder(self) -> str:
+        """Get the export folder path."""
+        return self._export_folder_edit.text()
+
+    def _browse_source_folder(self) -> None:
+        """Open folder browser for source folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Quellordner auswählen", self._source_folder_edit.text()
+        )
+        if folder:
+            self._source_folder_edit.setText(folder)
+            self._save_settings()
+
+    def _browse_export_folder(self) -> None:
+        """Open folder browser for export folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Exportordner auswählen", self._export_folder_edit.text()
+        )
+        if folder:
+            self._export_folder_edit.setText(folder)
+            self._save_settings()
+
+    def _load_settings(self) -> None:
+        """Load settings from QSettings."""
+        settings = QSettings("Trilumin", "TriluMinProcess")
+
+        # Load values
+        self._values_spinbox.setValue(settings.value("values", 5, type=int))
+        self._steps_spinbox.setValue(settings.value("steps", 9, type=int))
+        self._edge_slider.setValue(settings.value("edge_sensitivity", 50, type=int))
+
+        # Load sort method
+        sort_index = settings.value("sort_method", 0, type=int)
+        self._sort_combo.setCurrentIndex(sort_index)
+
+        # Load add numbers
+        self._add_numbers_checkbox.setChecked(
+            settings.value("add_numbers", True, type=bool)
+        )
+
+        # Load outline source
+        outline_index = settings.value("outline_source", 1, type=int)
+        self._outline_source_combo.setCurrentIndex(outline_index)
+
+        # Load folders
+        self._source_folder_edit.setText(
+            settings.value("source_folder", "", type=str)
+        )
+        self._export_folder_edit.setText(
+            settings.value("export_folder", "", type=str)
+        )
+
+    def save_settings(self) -> None:
+        """Save current settings to QSettings."""
+        self._save_settings()
+
+    def _save_settings(self) -> None:
+        """Save current settings to QSettings (internal)."""
+        settings = QSettings("Trilumin", "TriluMinProcess")
+
+        settings.setValue("values", self._values_spinbox.value())
+        settings.setValue("steps", self._steps_spinbox.value())
+        settings.setValue("edge_sensitivity", self._edge_slider.value())
+        settings.setValue("sort_method", self._sort_combo.currentIndex())
+        settings.setValue("add_numbers", self._add_numbers_checkbox.isChecked())
+        settings.setValue("outline_source", self._outline_source_combo.currentIndex())
+        settings.setValue("source_folder", self._source_folder_edit.text())
+        settings.setValue("export_folder", self._export_folder_edit.text())
 
 
 class ResultPanel(QWidget):

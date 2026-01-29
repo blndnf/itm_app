@@ -24,6 +24,7 @@ from gui.widgets import (
     SettingsPanel,
     ResultPanel,
     AbstractionSettingsPanel,
+    OutlineSource,
 )
 from processing.outlines import OutlineExtractor
 from processing.shades import ShadeQuantizer
@@ -42,7 +43,7 @@ class ProcessingOptions:
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"
     add_numbers: bool = True
-    use_posterized_for_outlines: bool = True
+    outline_source: OutlineSource = OutlineSource.POSTERIZED
     abstraction_settings: Optional[AbstractionSettings] = None
 
 
@@ -95,21 +96,43 @@ class ProcessingWorker(QThread):
             )
             results["grayscale_levels"] = shade_quantizer.get_value_levels()
 
-            # Process outlines (using posterized image if enabled)
+            # Process outlines based on selected source
             self.progress.emit("Extrahiere Konturen...")
             outline_extractor = OutlineExtractor()
             outline_extractor.set_sensitivity(opts.edge_sensitivity)
 
-            if opts.use_posterized_for_outlines:
-                # Use posterized image for clearer edges
-                posterized_for_outline = palette_extractor.create_posterized_image(
-                    working_image, add_numbers=False
-                )
+            # Get outline source image(s)
+            posterized_for_outline = palette_extractor.create_posterized_image(
+                working_image, add_numbers=False
+            )
+
+            if opts.outline_source == OutlineSource.ORIGINAL:
+                results["outlines"] = outline_extractor.extract(working_image)
+            elif opts.outline_source == OutlineSource.POSTERIZED:
                 results["outlines"] = outline_extractor.extract(
                     working_image, posterized_image=posterized_for_outline
                 )
-            else:
-                results["outlines"] = outline_extractor.extract(working_image)
+            elif opts.outline_source == OutlineSource.SHADES:
+                # Use grayscale shades image for outlines
+                shades_for_outline = shade_quantizer.quantize(
+                    working_image, add_numbers=False
+                )
+                results["outlines"] = outline_extractor.extract(
+                    working_image, posterized_image=shades_for_outline
+                )
+            elif opts.outline_source == OutlineSource.COMBINED:
+                # Combine posterized and shades outlines
+                outlines_poster = outline_extractor.extract(
+                    working_image, posterized_image=posterized_for_outline
+                )
+                shades_for_outline = shade_quantizer.quantize(
+                    working_image, add_numbers=False
+                )
+                outlines_shades = outline_extractor.extract(
+                    working_image, posterized_image=shades_for_outline
+                )
+                # Combine: take minimum (darker = edge) of both
+                results["outlines"] = np.minimum(outlines_poster, outlines_shades)
 
             # Create combined palette image with grayscales
             # High resolution with auto-calculated DIN A4 layout
@@ -161,11 +184,6 @@ class MainWindow(QMainWindow):
         self._open_button = QPushButton("Bild öffnen")
         self._open_button.setMinimumWidth(120)
         toolbar_layout.addWidget(self._open_button)
-
-        self._process_button = QPushButton("Verarbeiten")
-        self._process_button.setMinimumWidth(120)
-        self._process_button.setEnabled(False)
-        toolbar_layout.addWidget(self._process_button)
 
         self._update_button = QPushButton("Aktualisieren")
         self._update_button.setMinimumWidth(120)
@@ -258,7 +276,6 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self._open_button.clicked.connect(self._open_image)
-        self._process_button.clicked.connect(self._process_image)
         self._update_button.clicked.connect(self._process_image)
         self._save_all_button.clicked.connect(self._save_all)
         self._toggle_preview_button.clicked.connect(self._toggle_preview)
@@ -293,10 +310,13 @@ class MainWindow(QMainWindow):
             self._toggle_preview_button.setText("Zeige: Original")
 
     def _open_image(self) -> None:
+        # Use source folder from settings if available
+        start_folder = self._settings_panel.get_source_folder() or ""
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Bild öffnen",
-            "",
+            start_folder,
             ImageIO.get_file_filter("load"),
         )
 
@@ -308,7 +328,6 @@ class MainWindow(QMainWindow):
                 self._show_abstracted = False
                 self._current_file_path = file_path
                 self._source_preview.set_image(image)
-                self._process_button.setEnabled(True)
                 self._toggle_preview_button.setEnabled(False)
                 self._toggle_preview_button.setText("Zeige: Original")
                 self._clear_results()
@@ -318,6 +337,9 @@ class MainWindow(QMainWindow):
                     f"Geladen: {os.path.basename(file_path)} "
                     f"({info['width']}x{info['height']} px)"
                 )
+
+                # Auto-process immediately after loading
+                self._process_image()
             else:
                 QMessageBox.critical(
                     self,
@@ -342,7 +364,7 @@ class MainWindow(QMainWindow):
             sort_method=self._settings_panel.get_sort_method(),
             grays_position=self._settings_panel.get_grays_position(),
             add_numbers=self._settings_panel.should_add_numbers(),
-            use_posterized_for_outlines=self._settings_panel.use_posterized_for_outlines(),
+            outline_source=self._settings_panel.get_outline_source(),
             abstraction_settings=abstraction_settings,
         )
 
@@ -351,7 +373,6 @@ class MainWindow(QMainWindow):
             return
 
         # Disable UI during processing
-        self._process_button.setEnabled(False)
         self._update_button.setEnabled(False)
         self._open_button.setEnabled(False)
         self._toggle_preview_button.setEnabled(False)
@@ -395,7 +416,6 @@ class MainWindow(QMainWindow):
         self._palette_panel.set_image(results["palette"], is_rgb=True)
 
         # Re-enable UI
-        self._process_button.setEnabled(True)
         self._open_button.setEnabled(True)
         self._save_all_button.setEnabled(True)
         self._update_button.setEnabled(False)
@@ -421,7 +441,6 @@ class MainWindow(QMainWindow):
         )
 
     def _on_processing_error(self, error_message: str) -> None:
-        self._process_button.setEnabled(True)
         self._open_button.setEnabled(True)
         self._update_button.setEnabled(self._settings_changed_since_process)
         self._progress_bar.hide()
@@ -492,10 +511,13 @@ class MainWindow(QMainWindow):
         if not self._results:
             return
 
+        # Use export folder from settings if available
+        start_folder = self._settings_panel.get_export_folder() or ""
+
         directory = QFileDialog.getExistingDirectory(
             self,
             "Speicherort auswählen",
-            "",
+            start_folder,
         )
 
         if not directory:
@@ -543,3 +565,8 @@ class MainWindow(QMainWindow):
                 "Gespeichert",
                 f"Alle {saved_count} Bilder wurden erfolgreich gespeichert.",
             )
+
+    def closeEvent(self, event) -> None:
+        """Save settings when closing the window."""
+        self._settings_panel.save_settings()
+        super().closeEvent(event)
