@@ -36,6 +36,59 @@ class OutlineSource(Enum):
     COMBINED = "combined"
 
 
+class ZoomWindow(QWidget):
+    """Floating window for enlarged image preview."""
+
+    def __init__(self, title: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle(title or "Vergrößerung")
+        self.setMinimumSize(600, 400)
+        self.resize(900, 700)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Scroll area for large images
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setStyleSheet("background-color: #2a2a2a;")
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll_area.setWidget(self._image_label)
+
+        layout.addWidget(self._scroll_area)
+
+    def set_image(self, image: np.ndarray, is_rgb: bool = False) -> None:
+        """Set the image to display."""
+        if image is None:
+            return
+
+        # Convert to RGB if needed
+        if len(image.shape) == 2:
+            display_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif not is_rgb:
+            display_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            display_image = image
+
+        # Create QImage and QPixmap
+        height, width = display_image.shape[:2]
+        bytes_per_line = 3 * width
+        q_image = QImage(
+            display_image.data.tobytes(),
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format.Format_RGB888,
+        )
+
+        # Show at actual size or scaled to fit window
+        pixmap = QPixmap.fromImage(q_image)
+        self._image_label.setPixmap(pixmap)
+        self._image_label.adjustSize()
+
+
 class ImagePreview(QWidget):
     """Widget for displaying image previews with automatic scaling."""
 
@@ -45,6 +98,8 @@ class ImagePreview(QWidget):
         super().__init__(parent)
         self._image: Optional[np.ndarray] = None
         self._title = title
+        self._zoom_window: Optional[ZoomWindow] = None
+        self._is_rgb: bool = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -84,6 +139,7 @@ class ImagePreview(QWidget):
             is_rgb: True if image is RGB, False if BGR or grayscale.
         """
         self._image = image.copy()
+        self._is_rgb = is_rgb
 
         # Convert to RGB if needed
         if len(image.shape) == 2:
@@ -138,13 +194,28 @@ class ImagePreview(QWidget):
     def clear(self) -> None:
         """Clear the displayed image."""
         self._image = None
+        self._is_rgb = False
         self._image_label.clear()
         self._image_label.setText("Kein Bild")
+        if self._zoom_window:
+            self._zoom_window.close()
+            self._zoom_window = None
 
     def mousePressEvent(self, event) -> None:
-        """Handle mouse press events."""
+        """Handle mouse press events - open zoom window."""
+        if self._image is not None:
+            self._show_zoom_window()
         self.clicked.emit()
         super().mousePressEvent(event)
+
+    def _show_zoom_window(self) -> None:
+        """Show or update the zoom window."""
+        if self._zoom_window is None:
+            self._zoom_window = ZoomWindow(self._title)
+        self._zoom_window.set_image(self._image, self._is_rgb)
+        self._zoom_window.show()
+        self._zoom_window.raise_()
+        self._zoom_window.activateWindow()
 
 
 class SettingsPanel(QWidget):
