@@ -516,7 +516,7 @@ class PaletteExtractor:
         if grayscales:
             from utils.color_naming import int_to_roman
 
-            separator_y = rows * cell_height + int(40 * scale_factor)
+            separator_y = rows * cell_height + int(8 * scale_factor)
             line_thickness = max(1, int(scale_factor))
             line_margin = int(5 * scale_factor)
             # Draw separator line
@@ -528,26 +528,25 @@ class PaletteExtractor:
                 line_thickness,
             )
 
-            gray_y = separator_y + int(40 * scale_factor)
-            num_grays = len(grayscales)
-            gray_swatch_width = min(swatch_size, (width - 2 * line_margin) // num_grays)
+            gray_y = separator_y + int(8 * scale_factor)
+            gray_swatch_width = (width - 2 * line_margin) // num_grays
 
             for i, gray_val in enumerate(grayscales):
                 gx = line_margin + i * gray_swatch_width
                 gv = int(gray_val)  # Convert to Python int for OpenCV
 
-                # Draw gray swatch
+                # Draw gray swatch (smaller height)
                 cv2.rectangle(
                     palette_img,
                     (gx + margin, gray_y + margin),
-                    (gx + gray_swatch_width - margin, gray_y + swatch_size - margin),
+                    (gx + gray_swatch_width - margin, gray_y + gray_swatch_height - margin),
                     (gv, gv, gv),
                     -1,
                 )
                 cv2.rectangle(
                     palette_img,
                     (gx + margin, gray_y + margin),
-                    (gx + gray_swatch_width - margin, gray_y + swatch_size - margin),
+                    (gx + gray_swatch_width - margin, gray_y + gray_swatch_height - margin),
                     (100, 100, 100),
                     border_thickness,
                 )
@@ -556,13 +555,13 @@ class PaletteExtractor:
                 tc = get_text_color_for_background((gv, gv, gv))
                 text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 roman = int_to_roman(i + 1)
-                gray_font_scale = 0.5 * scale_factor
+                gray_font_scale = 0.4 * scale_factor
                 gray_thickness = max(1, int(scale_factor))
                 (tw, th), _ = cv2.getTextSize(
                     roman, cv2.FONT_HERSHEY_SIMPLEX, gray_font_scale, gray_thickness
                 )
                 rx = gx + (gray_swatch_width - tw) // 2
-                ry = gray_y + (swatch_size + th) // 2
+                ry = gray_y + (gray_swatch_height + th) // 2
                 cv2.putText(
                     palette_img,
                     roman,
