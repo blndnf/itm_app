@@ -319,13 +319,23 @@ class PaletteExtractor:
                 tc = get_text_color_for_background(color_int)
                 text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-                # Calculate font scale based on region size
-                font_scale = min(1.0, max(0.4, area / 10000))
+                # Calculate font scale based on image size and region area
+                # Base scale proportional to image diagonal (reference: 1500px = 1.0)
+                image_diagonal = (width**2 + height**2) ** 0.5
+                base_scale = image_diagonal / 1500.0
+
+                # Area factor: larger regions get slightly larger text
+                image_area = width * height
+                area_factor = min(1.3, max(0.7, (area / (image_area * 0.01)) ** 0.3))
+
+                # Final scale, clamped to reasonable range
+                font_scale = min(2.5, max(0.4, base_scale * area_factor))
+                thickness = max(1, int(font_scale * 2))
 
                 # Draw number
                 text = str(number)
                 (text_width, text_height), baseline = cv2.getTextSize(
-                    text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2
+                    text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
                 )
 
                 # Center text
@@ -339,7 +349,7 @@ class PaletteExtractor:
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale,
                     text_color,
-                    2,
+                    thickness,
                     cv2.LINE_AA,
                 )
 
@@ -447,10 +457,25 @@ class PaletteExtractor:
             # Draw name below swatch
             if show_name:
                 name = color_info.name
-                name_font_scale = 2.0 * scale_factor
-                name_thickness = max(1, int(2 * scale_factor))
-                text_x = x + int(10 * scale_factor)
-                text_y = y + swatch_size + int(100 * scale_factor)
+                # Calculate font scale to fit text within swatch width
+                max_text_width = swatch_size - int(10 * scale_factor)
+                name_thickness = max(1, int(1.5 * scale_factor))
+
+                # Start with a reasonable font scale and adjust to fit
+                name_font_scale = 1.5 * scale_factor
+                (tw, th), _ = cv2.getTextSize(
+                    name, cv2.FONT_HERSHEY_SIMPLEX, name_font_scale, name_thickness
+                )
+
+                # Reduce font scale if text is too wide
+                while tw > max_text_width and name_font_scale > 0.3:
+                    name_font_scale *= 0.85
+                    (tw, th), _ = cv2.getTextSize(
+                        name, cv2.FONT_HERSHEY_SIMPLEX, name_font_scale, name_thickness
+                    )
+
+                text_x = x + int(5 * scale_factor)
+                text_y = y + swatch_size + th + int(10 * scale_factor)
                 cv2.putText(
                     palette_img,
                     name,

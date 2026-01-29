@@ -118,13 +118,23 @@ class ShadeQuantizer:
                 tc = get_text_color_for_background((lv, lv, lv))
                 text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-                # Calculate font scale based on region size
-                font_scale = min(0.8, max(0.4, area / 15000))
+                # Calculate font scale based on image size and region area
+                # Base scale proportional to image diagonal (reference: 1500px = 1.0)
+                image_diagonal = (width**2 + height**2) ** 0.5
+                base_scale = image_diagonal / 1500.0
+
+                # Area factor: larger regions get slightly larger text
+                image_area = width * height
+                area_factor = min(1.3, max(0.7, (area / (image_area * 0.01)) ** 0.3))
+
+                # Final scale, clamped to reasonable range
+                font_scale = min(2.5, max(0.4, base_scale * area_factor))
+                thickness = max(1, int(font_scale * 2))
 
                 # Draw Roman numeral
                 roman = int_to_roman(i + 1)
                 (text_width, text_height), baseline = cv2.getTextSize(
-                    roman, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2
+                    roman, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
                 )
 
                 # Center text
@@ -138,7 +148,7 @@ class ShadeQuantizer:
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale,
                     text_color,
-                    2,
+                    thickness,
                     cv2.LINE_AA,
                 )
 
