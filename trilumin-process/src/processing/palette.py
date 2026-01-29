@@ -359,7 +359,7 @@ class PaletteExtractor:
         self,
         colors: List[ColorInfo],
         swatch_size: int = 60,
-        cols: int = 3,
+        cols: int = 0,  # 0 = auto-calculate for DIN A4 ratio
         show_name: bool = True,
         show_number: bool = True,
         grayscales: Optional[List[int]] = None,
@@ -370,7 +370,7 @@ class PaletteExtractor:
         Args:
             colors: List of ColorInfo objects.
             swatch_size: Size of each color swatch in pixels.
-            cols: Number of columns in the palette grid.
+            cols: Number of columns (0 = auto for DIN A4 landscape ratio).
             show_name: Whether to show color names.
             show_number: Whether to show numbers on swatches.
             grayscales: Optional list of grayscale values to add below.
@@ -379,28 +379,53 @@ class PaletteExtractor:
             RGB image of the color palette.
         """
         num_colors = len(colors)
-        rows = (num_colors + cols - 1) // cols
+        num_grays = len(grayscales) if grayscales else 0
 
-        # Calculate dimensions - scale proportionally to swatch_size
-        # Base reference: swatch_size=60 with text_height=20, margin=2, font_scale=0.6/0.3
+        # Scale factor for fonts/margins (reference: swatch_size=60)
         scale_factor = swatch_size / 60.0
-        text_height = int(160 * scale_factor) if show_name else 0
-        margin = max(2, int(2 * scale_factor))
-        cell_height = swatch_size + text_height
+
+        # Text height: much smaller, just enough for readable text
+        text_height = int(35 * scale_factor) if show_name else 0
+        margin = max(2, int(3 * scale_factor))
+        padding = int(8 * scale_factor)  # Padding between swatch and text
+
+        cell_height = swatch_size + text_height + padding
         cell_width = swatch_size
 
-        # Add space for grayscale section if provided
+        # Auto-calculate columns for DIN A4 landscape ratio (1.414:1)
+        if cols <= 0:
+            # Target aspect ratio: width/height ≈ 1.414 (A4 landscape)
+            target_ratio = 1.414
+            # Estimate gray section height
+            gray_row_height = (swatch_size // 2 + text_height + int(20 * scale_factor)) if grayscales else 0
+
+            # Find optimal columns
+            best_cols = 3
+            best_diff = float('inf')
+            for test_cols in range(3, min(num_colors + 1, 12)):
+                test_rows = (num_colors + test_cols - 1) // test_cols
+                test_width = test_cols * cell_width
+                test_height = test_rows * cell_height + gray_row_height
+                ratio = test_width / test_height if test_height > 0 else 0
+                diff = abs(ratio - target_ratio)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_cols = test_cols
+            cols = best_cols
+
+        rows = (num_colors + cols - 1) // cols
+
+        # Grayscale section: smaller swatches in a single row
         gray_section_height = 0
-        separator_gap = int(80 * scale_factor)  # Gap for separator
+        gray_swatch_height = swatch_size // 2
         if grayscales:
-            gray_section_height = swatch_size + text_height + separator_gap
+            gray_section_height = gray_swatch_height + text_height + int(20 * scale_factor)
 
         # Create image with dark gray background
         width = cols * cell_width
         height = rows * cell_height + gray_section_height
-        palette_img = np.ones((height, width, 3), dtype=np.uint8) * 50  # Dark gray bg
+        palette_img = np.ones((height, width, 3), dtype=np.uint8) * 50
 
-        # Pre-calculate border thickness for swatches
         border_thickness = max(1, int(scale_factor))
 
         # Draw color swatches
