@@ -1,7 +1,8 @@
 """Main window for Trilumin Process application."""
 
 import os
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, List
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -26,9 +27,23 @@ from gui.widgets import (
 )
 from processing.outlines import OutlineExtractor
 from processing.shades import ShadeQuantizer
-from processing.palette import PaletteExtractor
+from processing.palette import PaletteExtractor, PaletteSettings, SortMethod
 from processing.abstraction import ImageAbstractor, AbstractionSettings
 from utils.image_io import ImageIO
+
+
+@dataclass
+class ProcessingOptions:
+    """Options for the processing worker."""
+
+    num_values: int = 5
+    num_colors: int = 9
+    edge_sensitivity: float = 0.5
+    sort_method: SortMethod = SortMethod.HUE
+    grays_position: str = "end"
+    add_numbers: bool = True
+    use_posterized_for_outlines: bool = True
+    abstraction_settings: Optional[AbstractionSettings] = None
 
 
 class ProcessingWorker(QThread):
@@ -38,54 +53,72 @@ class ProcessingWorker(QThread):
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(
-        self,
-        image: np.ndarray,
-        num_values: int,
-        num_colors: int,
-        edge_sensitivity: float,
-        abstraction_settings: Optional[AbstractionSettings] = None,
-    ):
+    def __init__(self, image: np.ndarray, options: ProcessingOptions):
         super().__init__()
         self.image = image
-        self.num_values = num_values
-        self.num_colors = num_colors
-        self.edge_sensitivity = edge_sensitivity
-        self.abstraction_settings = abstraction_settings
+        self.options = options
 
     def run(self) -> None:
         try:
             results = {}
+            opts = self.options
 
             # Apply abstraction if enabled
-            if self.abstraction_settings and self.abstraction_settings.enabled:
+            if opts.abstraction_settings and opts.abstraction_settings.enabled:
                 self.progress.emit("Wende Vorverarbeitung an...")
-                abstractor = ImageAbstractor(self.abstraction_settings)
+                abstractor = ImageAbstractor(opts.abstraction_settings)
                 working_image = abstractor.abstract(self.image)
                 results["abstracted"] = working_image
             else:
                 working_image = self.image
                 results["abstracted"] = None
 
-            # Process outlines
-            self.progress.emit("Extrahiere Konturen...")
-            outline_extractor = OutlineExtractor()
-            outline_extractor.set_sensitivity(self.edge_sensitivity)
-            results["outlines"] = outline_extractor.extract(working_image)
+            # Process palette FIRST (needed for outlines from posterized)
+            self.progress.emit("Extrahiere Farbpalette...")
+            palette_settings = PaletteSettings(
+                num_colors=opts.num_colors,
+                sort_method=opts.sort_method,
+                grays_position=opts.grays_position,
+            )
+            palette_extractor = PaletteExtractor(palette_settings)
+            results["colors"] = palette_extractor.extract_palette(working_image)
+            results["posterized"] = palette_extractor.create_posterized_image(
+                working_image, add_numbers=opts.add_numbers
+            )
 
             # Process shades
             self.progress.emit("Quantisiere Graustufen...")
             shade_quantizer = ShadeQuantizer()
-            shade_quantizer.set_num_values(self.num_values)
-            results["shades"] = shade_quantizer.quantize(working_image)
+            shade_quantizer.set_num_values(opts.num_values)
+            results["shades"] = shade_quantizer.quantize(
+                working_image, add_numbers=opts.add_numbers
+            )
+            results["grayscale_levels"] = shade_quantizer.get_value_levels()
 
-            # Process palette
-            self.progress.emit("Extrahiere Farbpalette...")
-            palette_extractor = PaletteExtractor()
-            palette_extractor.set_num_colors(self.num_colors)
-            results["colors"] = palette_extractor.extract_palette(working_image)
-            results["posterized"] = palette_extractor.create_posterized_image(working_image)
-            results["palette"] = palette_extractor.create_palette_image(results["colors"])
+            # Process outlines (using posterized image if enabled)
+            self.progress.emit("Extrahiere Konturen...")
+            outline_extractor = OutlineExtractor()
+            outline_extractor.set_sensitivity(opts.edge_sensitivity)
+
+            if opts.use_posterized_for_outlines:
+                # Use posterized image for clearer edges
+                posterized_for_outline = palette_extractor.create_posterized_image(
+                    working_image, add_numbers=False
+                )
+                results["outlines"] = outline_extractor.extract(
+                    working_image, posterized_image=posterized_for_outline
+                )
+            else:
+                results["outlines"] = outline_extractor.extract(working_image)
+
+            # Create combined palette image with grayscales
+            self.progress.emit("Erstelle Palettenbild...")
+            results["palette"] = palette_extractor.create_palette_image(
+                results["colors"],
+                show_name=True,
+                show_number=opts.add_numbers,
+                grayscales=results["grayscale_levels"],
+            )
 
             self.finished.emit(results)
 
@@ -166,7 +199,7 @@ class MainWindow(QMainWindow):
         self._source_preview = ImagePreview("Quellbild")
         left_layout.addWidget(self._source_preview, stretch=2)
 
-        # Abstraction settings panel (new)
+        # Abstraction settings panel
         self._abstraction_panel = AbstractionSettingsPanel()
         left_layout.addWidget(self._abstraction_panel)
 
@@ -239,7 +272,6 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self) -> None:
         """Handle settings changes."""
         self._settings_changed_since_process = True
-        # Enable update button if we have results
         if self._results:
             self._update_button.setEnabled(True)
 
@@ -278,7 +310,6 @@ class MainWindow(QMainWindow):
                 self._toggle_preview_button.setText("Zeige: Original")
                 self._clear_results()
 
-                # Get image info
                 info = ImageIO.get_image_info(file_path)
                 self._status_bar.showMessage(
                     f"Geladen: {os.path.basename(file_path)} "
@@ -291,12 +322,25 @@ class MainWindow(QMainWindow):
                     "Das Bild konnte nicht geladen werden.",
                 )
 
-    def _get_abstraction_settings(self) -> AbstractionSettings:
-        """Get current abstraction settings from UI."""
-        return AbstractionSettings(
-            enabled=self._abstraction_panel.is_enabled(),
-            method=self._abstraction_panel.get_method(),
-            detail_level=self._abstraction_panel.get_detail_level(),
+    def _get_processing_options(self) -> ProcessingOptions:
+        """Build processing options from current UI settings."""
+        abstraction_settings = None
+        if self._abstraction_panel.is_enabled():
+            abstraction_settings = AbstractionSettings(
+                enabled=True,
+                method=self._abstraction_panel.get_method(),
+                detail_level=self._abstraction_panel.get_detail_level(),
+            )
+
+        return ProcessingOptions(
+            num_values=self._settings_panel.get_values(),
+            num_colors=self._settings_panel.get_steps(),
+            edge_sensitivity=self._settings_panel.get_edge_sensitivity(),
+            sort_method=self._settings_panel.get_sort_method(),
+            grays_position=self._settings_panel.get_grays_position(),
+            add_numbers=self._settings_panel.should_add_numbers(),
+            use_posterized_for_outlines=self._settings_panel.use_posterized_for_outlines(),
+            abstraction_settings=abstraction_settings,
         )
 
     def _process_image(self) -> None:
@@ -308,16 +352,13 @@ class MainWindow(QMainWindow):
         self._update_button.setEnabled(False)
         self._open_button.setEnabled(False)
         self._toggle_preview_button.setEnabled(False)
-        self._progress_bar.setRange(0, 0)  # Indeterminate
+        self._progress_bar.setRange(0, 0)
         self._progress_bar.show()
 
         # Create and start worker thread
         self._worker = ProcessingWorker(
             self._source_image,
-            self._settings_panel.get_values(),
-            self._settings_panel.get_steps(),
-            self._settings_panel.get_edge_sensitivity(),
-            self._get_abstraction_settings(),
+            self._get_processing_options(),
         )
         self._worker.progress.connect(self._on_processing_progress)
         self._worker.finished.connect(self._on_processing_finished)
@@ -335,7 +376,6 @@ class MainWindow(QMainWindow):
         if results.get("abstracted") is not None:
             self._abstracted_image = results["abstracted"]
             self._toggle_preview_button.setEnabled(True)
-            # Show abstracted image in preview
             self._show_abstracted = True
             self._source_preview.set_image(self._abstracted_image)
             self._toggle_preview_button.setText("Zeige: Vorverarbeitet")
@@ -358,20 +398,22 @@ class MainWindow(QMainWindow):
         self._update_button.setEnabled(False)
         self._progress_bar.hide()
 
+        # Build status message
+        opts = self._get_processing_options()
         abstraction_info = ""
-        if self._abstraction_panel.is_enabled():
+        if opts.abstraction_settings and opts.abstraction_settings.enabled:
             method_name = {
                 "pixelate": "Pixelierung",
                 "bilateral": "Bilateral",
                 "mean_shift": "Mean Shift",
                 "kmeans": "K-Means",
-            }.get(self._abstraction_panel.get_method().value, "")
+            }.get(opts.abstraction_settings.method.value, "")
             abstraction_info = f" | Vorverarbeitung: {method_name}"
 
         self._status_bar.showMessage(
             f"Verarbeitung abgeschlossen. "
-            f"{self._settings_panel.get_values()} Graustufen, "
-            f"{self._settings_panel.get_steps()} Farben"
+            f"{opts.num_values} Graustufen, "
+            f"{opts.num_colors} Farben"
             f"{abstraction_info}"
         )
 
@@ -404,7 +446,6 @@ class MainWindow(QMainWindow):
         if result_type not in self._results and result_type != "posterized":
             return
 
-        # Get the image to save
         if result_type == "outlines":
             image = self._outlines_panel.get_image()
         elif result_type == "shades":
@@ -419,7 +460,6 @@ class MainWindow(QMainWindow):
         if image is None:
             return
 
-        # Generate default filename
         base_name = ""
         if self._current_file_path:
             base_name = os.path.splitext(os.path.basename(self._current_file_path))[0]
@@ -435,7 +475,6 @@ class MainWindow(QMainWindow):
         )
 
         if file_path:
-            # Palette image is RGB, others are BGR or grayscale
             is_rgb = result_type == "palette"
             if ImageIO.save_image(image, file_path, is_rgb=is_rgb):
                 self._status_bar.showMessage(f"Gespeichert: {file_path}")
@@ -450,7 +489,6 @@ class MainWindow(QMainWindow):
         if not self._results:
             return
 
-        # Ask for directory
         directory = QFileDialog.getExistingDirectory(
             self,
             "Speicherort auswählen",
@@ -460,7 +498,6 @@ class MainWindow(QMainWindow):
         if not directory:
             return
 
-        # Generate base filename
         base_name = "trilumin"
         if self._current_file_path:
             base_name = os.path.splitext(os.path.basename(self._current_file_path))[0]
@@ -468,7 +505,6 @@ class MainWindow(QMainWindow):
         saved_count = 0
         errors = []
 
-        # Save each result
         result_map = [
             ("outlines", self._outlines_panel.get_image(), False),
             ("shades", self._shades_panel.get_image(), False),

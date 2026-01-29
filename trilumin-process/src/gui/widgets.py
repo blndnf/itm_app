@@ -22,6 +22,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
 from processing.abstraction import AbstractionMethod
+from processing.palette import SortMethod
 
 
 class ImagePreview(QWidget):
@@ -211,6 +212,41 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(edge_group)
 
+        # Palette sorting options
+        sort_group = QGroupBox("Paletten-Sortierung")
+        sort_layout = QVBoxLayout(sort_group)
+
+        # Sort method
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Sortierung:"))
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItem("Nach Farbton", SortMethod.HUE)
+        self._sort_combo.addItem("Nach Helligkeit", SortMethod.LIGHTNESS)
+        self._sort_combo.addItem("Nach Sättigung", SortMethod.SATURATION)
+        self._sort_combo.addItem("Nach Fläche", SortMethod.PERCENTAGE)
+        method_row.addWidget(self._sort_combo)
+        sort_layout.addLayout(method_row)
+
+        # Grays position
+        self._grays_end_checkbox = QCheckBox("Grautöne am Ende")
+        self._grays_end_checkbox.setChecked(True)
+        sort_layout.addWidget(self._grays_end_checkbox)
+
+        # Add numbers checkbox
+        self._add_numbers_checkbox = QCheckBox("Nummern anzeigen")
+        self._add_numbers_checkbox.setChecked(True)
+        sort_layout.addWidget(self._add_numbers_checkbox)
+
+        # Outlines from posterized
+        self._outlines_from_posterized = QCheckBox("Konturen aus Posterisierung")
+        self._outlines_from_posterized.setChecked(True)
+        self._outlines_from_posterized.setToolTip(
+            "Erzeugt klarere Konturen bei kontrastarmen Bildern"
+        )
+        sort_layout.addWidget(self._outlines_from_posterized)
+
+        layout.addWidget(sort_group)
+
         layout.addStretch()
 
     def _connect_signals(self) -> None:
@@ -223,6 +259,11 @@ class SettingsPanel(QWidget):
         self._steps_spinbox.valueChanged.connect(self._on_steps_spinbox_changed)
 
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
+
+        self._sort_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
+        self._grays_end_checkbox.toggled.connect(lambda: self.settings_changed.emit())
+        self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
+        self._outlines_from_posterized.toggled.connect(lambda: self.settings_changed.emit())
 
     def _on_steps_slider_changed(self, value: int) -> None:
         steps_value = value * 3  # Convert to multiple of 3
@@ -260,6 +301,22 @@ class SettingsPanel(QWidget):
     def get_edge_sensitivity(self) -> float:
         """Get edge sensitivity (0.0 to 1.0)."""
         return self._edge_slider.value() / 100.0
+
+    def get_sort_method(self) -> SortMethod:
+        """Get the selected palette sort method."""
+        return self._sort_combo.currentData()
+
+    def get_grays_position(self) -> str:
+        """Get grays position ('end' or 'mixed')."""
+        return "end" if self._grays_end_checkbox.isChecked() else "mixed"
+
+    def should_add_numbers(self) -> bool:
+        """Check if numbers should be added to images."""
+        return self._add_numbers_checkbox.isChecked()
+
+    def use_posterized_for_outlines(self) -> bool:
+        """Check if outlines should be extracted from posterized image."""
+        return self._outlines_from_posterized.isChecked()
 
 
 class ResultPanel(QWidget):
