@@ -186,13 +186,14 @@ def _get_color_family(rgb: Tuple[int, int, int]) -> str:
     Get the color family for a color (7 artist families).
 
     Families: rot, orange, gelb, grün, blau, violett, braun
-    Returns "gray" for low saturation colors.
+    Returns "gray" only for truly achromatic colors (s < 8).
     """
     r, g, b = rgb
     h, s, l = _get_hsl(rgb)
 
-    # Low saturation = gray (not a color family)
-    if s < 15:
+    # Only truly achromatic colors (s < 8) are gray
+    # This matches the color naming threshold
+    if s < 8:
         return "gray"
 
     # Very dark and desaturated = could be brown
@@ -547,9 +548,13 @@ class PaletteExtractor:
         pixels = rgb_image.reshape(-1, 3).astype(np.float32)
 
         # Subsample for performance if image is large
+        # Use fixed random state for reproducible sampling
+        # This ensures palette doesn't change when only sorting/contour settings change
+        rng = np.random.RandomState(self.settings.random_state)
+
         max_samples = 50000
         if len(pixels) > max_samples:
-            indices = np.random.choice(len(pixels), max_samples, replace=False)
+            indices = rng.choice(len(pixels), max_samples, replace=False)
             sample_pixels = pixels[indices]
         else:
             sample_pixels = pixels

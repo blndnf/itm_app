@@ -222,6 +222,8 @@ class MainWindow(QMainWindow):
         self._results: dict = {}
         self._worker: Optional[ProcessingWorker] = None
         self._current_file_path: Optional[str] = None
+        self._saved_display_index: int = 0
+        self._is_new_image_load: bool = False
         self._settings_changed_since_process: bool = False
 
         self._setup_ui()
@@ -408,8 +410,8 @@ class MainWindow(QMainWindow):
                     f"({info['width']}x{info['height']} px)"
                 )
 
-                # Auto-process immediately after loading
-                self._process_image()
+                # Auto-process immediately after loading (new image)
+                self._process_image(is_new_image=True)
             else:
                 QMessageBox.critical(
                     self,
@@ -444,9 +446,13 @@ class MainWindow(QMainWindow):
             palette_source=self._abstraction_panel.get_palette_source(),
         )
 
-    def _process_image(self) -> None:
+    def _process_image(self, is_new_image: bool = False) -> None:
         if self._source_image is None:
             return
+
+        # Save current display mode index (to restore after processing)
+        self._saved_display_index = self._display_combo.currentIndex()
+        self._is_new_image_load = is_new_image
 
         # Disable UI during processing
         self._update_button.setEnabled(False)
@@ -476,19 +482,36 @@ class MainWindow(QMainWindow):
         if results.get("abstracted") is not None:
             self._abstracted_image = results["abstracted"]
             self._show_abstracted = True
-            # Show abstracted by default, enable dropdown
-            self._display_combo.setCurrentIndex(1)  # "Vorverarbeitet"
-            self._source_preview.set_image(self._abstracted_image)
         else:
             self._abstracted_image = None
             self._show_abstracted = False
-            # Show source, but enable dropdown for composite
-            self._display_combo.setCurrentIndex(0)  # "Quelle"
-            if self._source_image is not None:
-                self._source_preview.set_image(self._source_image)
 
         # Enable display dropdown (composite is now available)
         self._display_combo.setEnabled(True)
+
+        # Determine which display mode to show
+        if self._is_new_image_load:
+            # New image: show "Vorverarbeitet" if available, else "Quelle"
+            if self._abstracted_image is not None:
+                self._display_combo.setCurrentIndex(1)  # "Vorverarbeitet"
+                self._source_preview.set_image(self._abstracted_image)
+            else:
+                self._display_combo.setCurrentIndex(0)  # "Quelle"
+                if self._source_image is not None:
+                    self._source_preview.set_image(self._source_image)
+        else:
+            # Settings update: restore previous display mode
+            target_index = self._saved_display_index
+
+            # Validate the saved index is still valid
+            if target_index == 1 and self._abstracted_image is None:
+                target_index = 0  # Fall back to source if no abstracted
+            elif target_index == 2 and "composite" not in self._results:
+                target_index = 1 if self._abstracted_image else 0
+
+            self._display_combo.setCurrentIndex(target_index)
+            # Trigger display update
+            self._on_display_changed(target_index)
 
         # Display results
         self._outlines_panel.set_image(results["outlines"])

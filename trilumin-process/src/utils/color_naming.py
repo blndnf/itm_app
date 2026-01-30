@@ -90,7 +90,7 @@ COLOR_DATABASE: Dict[str, Tuple[int, int, int]] = {
     "Indigoblau": (75, 0, 130),
     "Coelinblau": (0, 123, 167),
 
-    # Purples/Violets
+    # Purples/Violets (extended with muted variants)
     "Violett": (138, 43, 226),
     "Lila": (128, 0, 128),
     "Magenta": (255, 0, 255),
@@ -101,6 +101,12 @@ COLOR_DATABASE: Dict[str, Tuple[int, int, int]] = {
     "Pflaume": (142, 69, 133),
     "Aubergine": (97, 64, 81),
     "Dunkellila": (75, 0, 75),
+    "Gedecktes Violett": (100, 80, 120),
+    "Gedämpftes Lila": (120, 100, 130),
+    "Blassviolett": (150, 130, 160),
+    "Grauviolett": (130, 120, 145),
+    "Dunkles Mauve": (90, 70, 95),
+    "Rauchviolett": (115, 100, 125),
 
     # Browns
     "Braun": (139, 69, 19),
@@ -196,16 +202,20 @@ def _generate_descriptive_name(rgb: Tuple[int, int, int]) -> str:
     """
     Generate a descriptive color name based on HSL properties.
 
+    Uses a very conservative gray threshold (s < 5) to ensure
+    colors with even slight hue are named properly.
+
     Args:
         rgb: RGB tuple (0-255).
 
     Returns:
-        Descriptive name like "warmes Mittelgrau" or "gedecktes Blau".
+        Descriptive name like "gedecktes Violett" or "gedämpftes Blau".
     """
     h, s, l = _get_hsl(rgb)
 
-    # Determine if it's a gray
-    if s < 10:
+    # Only truly achromatic colors (s < 5) are gray
+    # Any color with s >= 5 has enough hue to be named as a color
+    if s < 5:
         if l < 15:
             return "Schwarz"
         elif l < 30:
@@ -219,7 +229,7 @@ def _generate_descriptive_name(rgb: Tuple[int, int, int]) -> str:
         else:
             return "Weiß"
 
-    # Determine base hue name
+    # Determine base hue name (7 families + cyan for blue-green)
     if h < 15 or h >= 345:
         base = "Rot"
     elif h < 45:
@@ -228,11 +238,11 @@ def _generate_descriptive_name(rgb: Tuple[int, int, int]) -> str:
         base = "Gelb"
     elif h < 150:
         base = "Grün"
-    elif h < 210:
-        base = "Cyan"
+    elif h < 195:
+        base = "Türkis"
     elif h < 270:
         base = "Blau"
-    elif h < 310:
+    elif h < 330:
         base = "Violett"
     else:
         base = "Magenta"
@@ -275,9 +285,22 @@ def _generate_descriptive_name(rgb: Tuple[int, int, int]) -> str:
     return base
 
 
+def _is_gray_name(name: str) -> bool:
+    """Check if a color name is a gray/white/black name."""
+    gray_terms = [
+        "grau", "weiß", "weiss", "schwarz", "anthrazit",
+        "gray", "grey", "white", "black", "charcoal", "silver", "silber"
+    ]
+    name_lower = name.lower()
+    return any(term in name_lower for term in gray_terms)
+
+
 def rgb_to_name(r: int, g: int, b: int) -> str:
     """
     Convert RGB values to the closest color name.
+
+    Uses hue-aware matching: colors with significant saturation
+    will NOT match to gray names, even if RGB distance is close.
 
     Args:
         r, g, b: Red, green, blue values (0-255).
@@ -286,16 +309,39 @@ def rgb_to_name(r: int, g: int, b: int) -> str:
         Human-readable color name in German.
     """
     rgb = (r, g, b)
+    h, s, l = _get_hsl(rgb)
+
+    # Determine if this color has significant hue (is chromatic)
+    # Even low saturation (>8%) with distinct hue should NOT be gray
+    is_chromatic = s > 8
 
     # Find closest match in database
     min_distance = float('inf')
     closest_name = None
+    closest_chromatic_name = None
+    min_chromatic_distance = float('inf')
 
     for name, color_rgb in COLOR_DATABASE.items():
         distance = _color_distance(rgb, color_rgb)
+
         if distance < min_distance:
             min_distance = distance
             closest_name = name
+
+        # Also track closest chromatic (non-gray) match
+        if not _is_gray_name(name) and distance < min_chromatic_distance:
+            min_chromatic_distance = distance
+            closest_chromatic_name = name
+
+    # If the input color has hue (is chromatic), prefer chromatic names
+    if is_chromatic:
+        # If closest match is gray but color has hue, use chromatic match instead
+        if _is_gray_name(closest_name) and closest_chromatic_name:
+            # Only use chromatic if not too far off
+            if min_chromatic_distance < 60:
+                return closest_chromatic_name
+            # Otherwise generate descriptive name (which uses hue)
+            return _generate_descriptive_name(rgb)
 
     # If very close match (distance < 30), use database name
     if min_distance < 30:
