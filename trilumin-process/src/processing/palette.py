@@ -27,6 +27,8 @@ class PaletteMethod(Enum):
     DIVERSE = "diverse"  # Maximize color diversity/contrast
     SATURATED = "saturated"  # Prioritize most saturated colors
     INTENSIFY = "intensify"  # Maximize hue diversity, guarantee vibrant colors from each hue
+    GLOW = "glow"  # Lightest colors from most frequent families
+    LUMINOUS = "luminous"  # Diverse + Glow compromise
 
 
 @dataclass
@@ -369,6 +371,198 @@ def _get_family_anchors(colors: List[ColorInfo]) -> List[ColorInfo]:
     return anchors
 
 
+def _get_color_lightness(r: int, g: int, b: int) -> float:
+    """Get lightness value (0-100) for an RGB color."""
+    _, _, l = _get_hsl((r, g, b))
+    return l
+
+
+def _get_family_by_area(colors: List[ColorInfo]) -> List[str]:
+    """
+    Get list of color families sorted by total area (percentage).
+
+    Returns families from most frequent to least frequent.
+    """
+    family_area: Dict[str, float] = {}
+
+    for c in colors:
+        family = _get_color_family(c.rgb)
+        if family == "gray":
+            continue
+        family_area[family] = family_area.get(family, 0) + c.percentage
+
+    # Sort by area descending
+    sorted_families = sorted(family_area.items(), key=lambda x: x[1], reverse=True)
+    return [f[0] for f in sorted_families]
+
+
+def _get_colors_by_family_and_lightness(
+    colors: List[ColorInfo]
+) -> Dict[str, List[ColorInfo]]:
+    """
+    Group colors by family, each list sorted by lightness (lightest first).
+
+    Returns dict mapping family name to list of ColorInfo sorted by lightness.
+    """
+    family_colors: Dict[str, List[ColorInfo]] = {}
+
+    for c in colors:
+        family = _get_color_family(c.rgb)
+        if family == "gray":
+            continue
+        if family not in family_colors:
+            family_colors[family] = []
+        family_colors[family].append(c)
+
+    # Sort each family by lightness (lightest first)
+    for family in family_colors:
+        family_colors[family].sort(
+            key=lambda c: _get_color_lightness(*c.rgb), reverse=True
+        )
+
+    return family_colors
+
+
+def _select_glow_colors(
+    colors: List[ColorInfo],
+    target_count: int,
+) -> List[ColorInfo]:
+    """
+    Select colors using the GLOW method:
+    1. Start with family anchors (most vibrant from each family)
+    2. Fill remaining slots by cycling through families by frequency,
+       taking the LIGHTEST remaining color from each family.
+
+    Args:
+        colors: List of chromatic colors.
+        target_count: Number of colors to select.
+
+    Returns:
+        List of selected colors.
+    """
+    # Step 1: Get family anchors (most vibrant per family)
+    family_anchors = _get_family_anchors(colors)
+    selected = family_anchors[:target_count]
+
+    if len(selected) >= target_count:
+        return selected
+
+    # Step 2: Get families sorted by area and colors by family/lightness
+    families_by_area = _get_family_by_area(colors)
+    colors_by_family = _get_colors_by_family_and_lightness(colors)
+
+    # Track which colors have been used
+    used_colors = set(id(c) for c in selected)
+
+    # Track current index in each family's lightness list
+    family_index: Dict[str, int] = {f: 0 for f in families_by_area}
+
+    # Cycle through families, taking lightest available from each
+    while len(selected) < target_count:
+        added_any = False
+
+        for family in families_by_area:
+            if len(selected) >= target_count:
+                break
+
+            if family not in colors_by_family:
+                continue
+
+            family_list = colors_by_family[family]
+
+            # Find next unused color in this family
+            while family_index[family] < len(family_list):
+                candidate = family_list[family_index[family]]
+                family_index[family] += 1
+
+                if id(candidate) not in used_colors:
+                    selected.append(candidate)
+                    used_colors.add(id(candidate))
+                    added_any = True
+                    break
+
+        # If no colors were added in this cycle, break to avoid infinite loop
+        if not added_any:
+            break
+
+    return selected
+
+
+def _select_luminous_colors(
+    colors: List[ColorInfo],
+    target_count: int,
+) -> List[ColorInfo]:
+    """
+    Select colors using the LUMINOUS method:
+    Compromise between DIVERSE (maximum contrast) and GLOW (lightest by frequency).
+
+    Combines both approaches:
+    1. Start with family anchors
+    2. For remaining slots, score candidates by both:
+       - Distance to selected colors (DIVERSE component)
+       - Lightness weighted by family frequency (GLOW component)
+
+    Args:
+        colors: List of chromatic colors.
+        target_count: Number of colors to select.
+
+    Returns:
+        List of selected colors.
+    """
+    # Step 1: Get family anchors
+    family_anchors = _get_family_anchors(colors)
+    selected = family_anchors[:target_count]
+
+    if len(selected) >= target_count:
+        return selected
+
+    # Get family areas for weighting
+    families_by_area = _get_family_by_area(colors)
+    family_rank = {f: i for i, f in enumerate(families_by_area)}
+    max_rank = len(families_by_area)
+
+    # Track used colors
+    used_colors = set(id(c) for c in selected)
+    remaining = [c for c in colors if id(c) not in used_colors]
+
+    while len(selected) < target_count and remaining:
+        best_color = None
+        best_score = -1
+
+        for candidate in remaining:
+            # DIVERSE component: minimum distance to selected colors
+            min_dist = min(
+                _color_distance_hsl(candidate.rgb, sel.rgb)
+                for sel in selected
+            )
+
+            # GLOW component: lightness weighted by family rank
+            lightness = _get_color_lightness(*candidate.rgb) / 100.0
+            family = _get_color_family(candidate.rgb)
+            rank = family_rank.get(family, max_rank)
+            # Higher rank = less frequent = lower weight
+            frequency_weight = 1.0 - (rank / (max_rank + 1))
+
+            # Combined score: 50% diverse, 50% glow
+            diverse_score = min_dist
+            glow_score = lightness * frequency_weight
+
+            score = 0.5 * diverse_score + 0.5 * glow_score
+
+            if score > best_score:
+                best_score = score
+                best_color = candidate
+
+        if best_color:
+            selected.append(best_color)
+            used_colors.add(id(best_color))
+            remaining.remove(best_color)
+        else:
+            break
+
+    return selected
+
+
 def _get_color_saturation(r: int, g: int, b: int) -> float:
     """Get saturation value (0-100) for an RGB color."""
     _, s, _ = _get_hsl((r, g, b))
@@ -671,6 +865,22 @@ class PaletteExtractor:
                 remaining = [c for c in chromatic_colors if c not in colors]
                 remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+        elif self.settings.palette_method == PaletteMethod.GLOW:
+            # GLOW: Start with family anchors, then fill with LIGHTEST colors
+            # cycling through families by frequency (most frequent first)
+            colors = _select_glow_colors(
+                chromatic_colors if chromatic_colors else all_colors,
+                self.settings.num_colors,
+            )
+
+        elif self.settings.palette_method == PaletteMethod.LUMINOUS:
+            # LUMINOUS: Compromise between DIVERSE and GLOW
+            # Balances maximum contrast with lightness/frequency
+            colors = _select_luminous_colors(
+                chromatic_colors if chromatic_colors else all_colors,
+                self.settings.num_colors,
+            )
 
         else:
             # STANDARD: Start with family anchors, fill by AREA (percentage)

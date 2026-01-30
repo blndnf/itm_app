@@ -57,7 +57,7 @@ COLOR_DATABASE: Dict[str, Tuple[int, int, int]] = {
     "Senfgelb": (205, 175, 0),
     "Neapelgelb": (250, 218, 94),
 
-    # Greens
+    # Greens (extended with more variants)
     "Grün": (0, 128, 0),
     "Hellgrün": (144, 238, 144),
     "Dunkelgrün": (0, 100, 0),
@@ -72,6 +72,13 @@ COLOR_DATABASE: Dict[str, Tuple[int, int, int]] = {
     "Chromoxidgrün": (31, 78, 47),
     "Seegrün": (46, 139, 87),
     "Türkisgrün": (0, 150, 136),
+    "Flaschengrün": (0, 106, 78),
+    "Laubgrün": (50, 120, 50),
+    "Kieferngrün": (1, 121, 111),
+    "Blattgrün": (76, 187, 23),
+    "Saftgrün": (80, 200, 120),
+    "Gedecktes Grün": (70, 100, 70),
+    "Gedämpftes Grün": (90, 120, 90),
 
     # Blues
     "Blau": (0, 0, 255),
@@ -295,12 +302,40 @@ def _is_gray_name(name: str) -> bool:
     return any(term in name_lower for term in gray_terms)
 
 
+def _get_hue_family(h: float, s: float) -> str:
+    """
+    Get the hue family for a given hue angle and saturation.
+
+    Returns one of: "gray", "rot", "orange", "gelb", "grün", "türkis", "blau", "violett"
+    """
+    if s < 8:
+        return "gray"
+
+    if h < 15 or h >= 345:
+        return "rot"
+    elif h < 45:
+        return "orange"
+    elif h < 70:
+        return "gelb"
+    elif h < 160:  # Extended green range to prevent green->blue mismatches
+        return "grün"
+    elif h < 200:
+        return "türkis"
+    elif h < 270:
+        return "blau"
+    elif h < 330:
+        return "violett"
+    else:
+        return "rot"
+
+
 def rgb_to_name(r: int, g: int, b: int) -> str:
     """
     Convert RGB values to the closest color name.
 
-    Uses hue-aware matching: colors with significant saturation
-    will NOT match to gray names, even if RGB distance is close.
+    Uses HUE-FAMILY aware matching: colors are first categorized by hue family,
+    and database matches are strongly preferred from the SAME family.
+    This prevents greens from being named as blue, etc.
 
     Args:
         r, g, b: Red, green, blue values (0-255).
@@ -310,44 +345,50 @@ def rgb_to_name(r: int, g: int, b: int) -> str:
     """
     rgb = (r, g, b)
     h, s, l = _get_hsl(rgb)
+    input_family = _get_hue_family(h, s)
 
-    # Determine if this color has significant hue (is chromatic)
-    # Even low saturation (>8%) with distinct hue should NOT be gray
-    is_chromatic = s > 8
+    # For truly achromatic colors, find closest gray
+    if input_family == "gray":
+        min_distance = float('inf')
+        closest_name = None
+        for name, color_rgb in COLOR_DATABASE.items():
+            db_h, db_s, _ = _get_hsl(color_rgb)
+            if db_s < 15:  # Database grays
+                distance = _color_distance(rgb, color_rgb)
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_name = name
+        if closest_name and min_distance < 40:
+            return closest_name
+        return _generate_descriptive_name(rgb)
 
-    # Find closest match in database
-    min_distance = float('inf')
-    closest_name = None
-    closest_chromatic_name = None
-    min_chromatic_distance = float('inf')
+    # For chromatic colors: STRONGLY prefer matches from the same hue family
+    same_family_matches = []
+    all_chromatic_matches = []
 
     for name, color_rgb in COLOR_DATABASE.items():
+        if _is_gray_name(name):
+            continue
+
+        db_h, db_s, _ = _get_hsl(color_rgb)
+        db_family = _get_hue_family(db_h, db_s)
         distance = _color_distance(rgb, color_rgb)
 
-        if distance < min_distance:
-            min_distance = distance
-            closest_name = name
+        if db_family == input_family:
+            same_family_matches.append((name, distance))
+        elif db_s >= 8:  # Other chromatic colors
+            all_chromatic_matches.append((name, distance))
 
-        # Also track closest chromatic (non-gray) match
-        if not _is_gray_name(name) and distance < min_chromatic_distance:
-            min_chromatic_distance = distance
-            closest_chromatic_name = name
+    # First try: find best match in same family
+    if same_family_matches:
+        same_family_matches.sort(key=lambda x: x[1])
+        best_name, best_dist = same_family_matches[0]
+        # Use if reasonably close
+        if best_dist < 50:
+            return best_name
 
-    # If the input color has hue (is chromatic), prefer chromatic names
-    if is_chromatic:
-        # If closest match is gray but color has hue, use chromatic match instead
-        if _is_gray_name(closest_name) and closest_chromatic_name:
-            # Only use chromatic if not too far off
-            if min_chromatic_distance < 60:
-                return closest_chromatic_name
-            # Otherwise generate descriptive name (which uses hue)
-            return _generate_descriptive_name(rgb)
-
-    # If very close match (distance < 30), use database name
-    if min_distance < 30:
-        return closest_name
-
-    # Otherwise generate descriptive name
+    # Second try: if no good same-family match, generate descriptive name
+    # This ensures the name always reflects the actual hue
     return _generate_descriptive_name(rgb)
 
 

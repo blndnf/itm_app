@@ -287,11 +287,15 @@ class SettingsPanel(QWidget):
         self._palette_method_combo = QComboBox()
         self._palette_method_combo.addItem("Intensify (empfohlen)", PaletteMethod.INTENSIFY)
         self._palette_method_combo.addItem("Divers", PaletteMethod.DIVERSE)
+        self._palette_method_combo.addItem("Glow", PaletteMethod.GLOW)
+        self._palette_method_combo.addItem("Luminous", PaletteMethod.LUMINOUS)
         self._palette_method_combo.addItem("Gesättigt", PaletteMethod.SATURATED)
         self._palette_method_combo.addItem("Standard", PaletteMethod.STANDARD)
         self._palette_method_combo.setToolTip(
             "Intensify: Garantiert leuchtende Farben aus jeder Farbfamilie\n"
             "Divers: Maximiert Farbkontraste, gute Abdeckung\n"
+            "Glow: Hellste Farben nach Flächenhäufigkeit der Farbfamilien\n"
+            "Luminous: Kompromiss zwischen Divers und Glow\n"
             "Gesättigt: Bevorzugt kräftige Farben\n"
             "Standard: Nach Häufigkeit (K-Means Original)"
         )
