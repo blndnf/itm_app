@@ -314,6 +314,7 @@ class PaletteExtractor:
         self._colors: Optional[np.ndarray] = None
         self._labels: Optional[np.ndarray] = None
         self._color_to_index: Dict[Tuple[int, int, int], int] = {}
+        self._palette_colors: Optional[np.ndarray] = None  # Selected palette RGB values
 
     def _validate_settings(self) -> None:
         """Ensure settings are within valid range."""
@@ -439,6 +440,9 @@ class PaletteExtractor:
         # Build color to index mapping for posterized numbering
         self._color_to_index = {c.rgb: c.index for c in colors}
 
+        # Store selected palette colors as numpy array for posterization
+        self._palette_colors = np.array([c.rgb for c in colors], dtype=np.uint8)
+
         return colors
 
     def create_posterized_image(
@@ -450,6 +454,9 @@ class PaletteExtractor:
         """
         Create a posterized version of the image using extracted palette.
 
+        Maps each pixel to the nearest color from the selected palette,
+        ensuring only palette colors appear in the posterized image.
+
         Args:
             image: Input image in BGR format.
             add_numbers: If True, add region numbers to the image.
@@ -458,7 +465,7 @@ class PaletteExtractor:
         Returns:
             Posterized image with reduced colors (BGR format).
         """
-        if self._colors is None:
+        if self._palette_colors is None:
             self.extract_palette(image)
 
         # Convert BGR to RGB
@@ -467,14 +474,32 @@ class PaletteExtractor:
         # Reshape to list of pixels
         pixels = rgb_image.reshape(-1, 3).astype(np.float32)
 
-        # Predict cluster for each pixel
-        labels = self._kmeans.predict(pixels)
+        # Map each pixel to nearest palette color (not all K-Means clusters)
+        # Compute distance from each pixel to each palette color
+        palette_float = self._palette_colors.astype(np.float32)
 
-        # Replace each pixel with its cluster center
-        posterized = self._colors[labels]
+        # Process in chunks to avoid memory issues with large images
+        chunk_size = 100000
+        num_pixels = len(pixels)
+        posterized_pixels = np.empty((num_pixels, 3), dtype=np.uint8)
+
+        for start in range(0, num_pixels, chunk_size):
+            end = min(start + chunk_size, num_pixels)
+            chunk = pixels[start:end]
+
+            # Calculate squared Euclidean distance to each palette color
+            # Shape: (chunk_size, num_palette_colors)
+            distances = np.sum(
+                (chunk[:, np.newaxis, :] - palette_float[np.newaxis, :, :]) ** 2,
+                axis=2
+            )
+
+            # Find nearest palette color for each pixel
+            nearest_indices = np.argmin(distances, axis=1)
+            posterized_pixels[start:end] = self._palette_colors[nearest_indices]
 
         # Reshape back to image dimensions
-        posterized = posterized.reshape(rgb_image.shape)
+        posterized = posterized_pixels.reshape(rgb_image.shape)
 
         # Convert back to BGR for display
         posterized_bgr = cv2.cvtColor(posterized, cv2.COLOR_RGB2BGR)
@@ -613,8 +638,8 @@ class PaletteExtractor:
         # Scale factor for fonts/margins (reference: swatch_size=60)
         scale_factor = swatch_size / 60.0
 
-        # Text height for layout calculation
-        text_height = int(35 * scale_factor) if show_name else 0
+        # Text height for layout calculation (scaled for 3x larger fonts)
+        text_height = int(105 * scale_factor) if show_name else 0
         margin = max(2, int(3 * scale_factor))
         padding = int(8 * scale_factor)
 
@@ -717,10 +742,10 @@ class PaletteExtractor:
         pil_image = Image.fromarray(palette_img)
         draw = ImageDraw.Draw(pil_image)
 
-        # Font sizes based on scale factor
-        number_font_size = max(16, int(24 * scale_factor))
-        name_font_size = max(12, int(18 * scale_factor))
-        gray_font_size = max(12, int(16 * scale_factor))
+        # Font sizes based on scale factor (3x larger for better readability)
+        number_font_size = max(16, int(72 * scale_factor))
+        name_font_size = max(12, int(54 * scale_factor))
+        gray_font_size = max(12, int(48 * scale_factor))
 
         number_font = self._get_font(number_font_size)
         name_font = self._get_font(name_font_size)
@@ -811,6 +836,7 @@ class PaletteExtractor:
         self._colors = None
         self._labels = None
         self._color_to_index = {}
+        self._palette_colors = None
 
     def set_sort_method(self, method: SortMethod) -> None:
         """Set the palette sorting method."""
