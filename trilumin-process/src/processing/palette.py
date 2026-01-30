@@ -179,23 +179,93 @@ def _is_low_saturation(r: int, g: int, b: int, threshold: float = 20.0) -> bool:
     return s < threshold
 
 
+def _is_extreme_lightness(r: int, g: int, b: int) -> bool:
+    """
+    Check if a color has extreme lightness (almost white or almost black).
+
+    These should be left to the shades layer, not color palette.
+    L > 95% = almost white, L < 5% = almost black
+
+    Returns:
+        True if lightness is extreme.
+    """
+    _, _, l = _get_hsl((r, g, b))
+    return l > 95 or l < 5
+
+
+def _is_chromatic_dynamic(r: int, g: int, b: int, for_glow: bool = False) -> bool:
+    """
+    Check if a color is chromatic using lightness-aware thresholds.
+
+    For very light colors, we accept lower saturation because physically
+    light colors have lower saturation but can still have clear hue.
+
+    Args:
+        r, g, b: RGB values.
+        for_glow: If True, use more permissive thresholds for GLOW/LUMINOUS methods.
+
+    Returns:
+        True if the color is chromatic (has enough hue to be a "color").
+    """
+    _, s, l = _get_hsl((r, g, b))
+
+    # Extreme lightness = not for color palette (shades layer)
+    if l > 95 or l < 5:
+        return False
+
+    if for_glow:
+        # GLOW/LUMINOUS: More permissive - we want to find light colors!
+        # Very light (L > 80): S >= 5% is enough
+        # Light (L > 65): S >= 8%
+        # Medium: S >= 12%
+        # Dark: S >= 15%
+        if l > 80:
+            return s >= 5
+        elif l > 65:
+            return s >= 8
+        elif l > 40:
+            return s >= 12
+        else:
+            return s >= 15
+    else:
+        # Standard methods: slightly more permissive for light colors
+        # Very light (L > 80): S >= 8%
+        # Light (L > 65): S >= 12%
+        # Normal: S >= 18%
+        if l > 80:
+            return s >= 8
+        elif l > 65:
+            return s >= 12
+        else:
+            return s >= 18
+
+
 # The 7 artist color families for palette diversity
 COLOR_FAMILIES = ["rot", "orange", "gelb", "grün", "blau", "violett", "braun"]
 
 
-def _get_color_family(rgb: Tuple[int, int, int]) -> str:
+def _get_color_family(rgb: Tuple[int, int, int], for_glow: bool = False) -> str:
     """
     Get the color family for a color (7 artist families).
 
     Families: rot, orange, gelb, grün, blau, violett, braun
-    Returns "gray" only for truly achromatic colors (s < 8).
+    Returns "gray" for achromatic colors or "extreme" for L>95%/L<5%.
     """
     r, g, b = rgb
     h, s, l = _get_hsl(rgb)
 
-    # Only truly achromatic colors (s < 8) are gray
-    # This matches the color naming threshold
-    if s < 8:
+    # Extreme lightness = shades layer, not color palette
+    if l > 95 or l < 5:
+        return "extreme"
+
+    # Gray threshold depends on lightness
+    # Light colors need less saturation to show hue
+    if for_glow:
+        gray_threshold = 5 if l > 80 else (8 if l > 65 else 12)
+    else:
+        gray_threshold = 8 if l > 80 else (10 if l > 65 else 12)
+
+    if s < gray_threshold:
         return "gray"
 
     # Very dark and desaturated = could be brown
@@ -331,6 +401,7 @@ def _check_family_diversity(colors: List[ColorInfo]) -> bool:
 
 def _find_most_vibrant_by_family(
     colors: List[ColorInfo],
+    for_glow: bool = False,
 ) -> Dict[str, ColorInfo]:
     """
     Find the most vibrant color from each of the 7 color families.
@@ -338,15 +409,19 @@ def _find_most_vibrant_by_family(
     Families: rot, orange, gelb, grün, blau, violett, braun
     This ensures diverse color representation in the final palette.
 
+    Args:
+        colors: List of ColorInfo objects.
+        for_glow: If True, use permissive thresholds for family classification.
+
     Returns:
         Dict mapping family name to most vibrant ColorInfo from that family.
     """
     family_colors: Dict[str, ColorInfo] = {}
 
     for c in colors:
-        family = _get_color_family(c.rgb)
-        if family == "gray":
-            continue  # Skip grays
+        family = _get_color_family(c.rgb, for_glow=for_glow)
+        if family == "gray" or family == "extreme":
+            continue  # Skip grays and extreme lightness
 
         sat = _get_color_saturation(*c.rgb)
 
@@ -359,13 +434,17 @@ def _find_most_vibrant_by_family(
     return family_colors
 
 
-def _get_family_anchors(colors: List[ColorInfo]) -> List[ColorInfo]:
+def _get_family_anchors(colors: List[ColorInfo], for_glow: bool = False) -> List[ColorInfo]:
     """
     Get one representative (most vibrant) color from each present color family.
 
+    Args:
+        colors: List of ColorInfo objects.
+        for_glow: If True, use permissive thresholds for family classification.
+
     Returns list sorted by saturation (most vibrant first).
     """
-    family_map = _find_most_vibrant_by_family(colors)
+    family_map = _find_most_vibrant_by_family(colors, for_glow=for_glow)
     anchors = list(family_map.values())
     anchors.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
     return anchors
@@ -377,17 +456,21 @@ def _get_color_lightness(r: int, g: int, b: int) -> float:
     return l
 
 
-def _get_family_by_area(colors: List[ColorInfo]) -> List[str]:
+def _get_family_by_area(colors: List[ColorInfo], for_glow: bool = False) -> List[str]:
     """
     Get list of color families sorted by total area (percentage).
+
+    Args:
+        colors: List of ColorInfo objects.
+        for_glow: If True, use permissive thresholds for family classification.
 
     Returns families from most frequent to least frequent.
     """
     family_area: Dict[str, float] = {}
 
     for c in colors:
-        family = _get_color_family(c.rgb)
-        if family == "gray":
+        family = _get_color_family(c.rgb, for_glow=for_glow)
+        if family == "gray" or family == "extreme":
             continue
         family_area[family] = family_area.get(family, 0) + c.percentage
 
@@ -397,18 +480,23 @@ def _get_family_by_area(colors: List[ColorInfo]) -> List[str]:
 
 
 def _get_colors_by_family_and_lightness(
-    colors: List[ColorInfo]
+    colors: List[ColorInfo],
+    for_glow: bool = False,
 ) -> Dict[str, List[ColorInfo]]:
     """
     Group colors by family, each list sorted by lightness (lightest first).
+
+    Args:
+        colors: List of ColorInfo objects.
+        for_glow: If True, use permissive thresholds for family classification.
 
     Returns dict mapping family name to list of ColorInfo sorted by lightness.
     """
     family_colors: Dict[str, List[ColorInfo]] = {}
 
     for c in colors:
-        family = _get_color_family(c.rgb)
-        if family == "gray":
+        family = _get_color_family(c.rgb, for_glow=for_glow)
+        if family == "gray" or family == "extreme":
             continue
         if family not in family_colors:
             family_colors[family] = []
@@ -433,23 +521,28 @@ def _select_glow_colors(
     2. Fill remaining slots by cycling through families by frequency,
        taking the LIGHTEST remaining color from each family.
 
+    Uses permissive saturation thresholds (for_glow=True) to include
+    light colors that still have discernible hue.
+
     Args:
-        colors: List of chromatic colors.
+        colors: List of chromatic colors (should be chromatic_colors_glow).
         target_count: Number of colors to select.
 
     Returns:
         List of selected colors.
     """
     # Step 1: Get family anchors (most vibrant per family)
-    family_anchors = _get_family_anchors(colors)
+    # Use for_glow=True for permissive family classification
+    family_anchors = _get_family_anchors(colors, for_glow=True)
     selected = family_anchors[:target_count]
 
     if len(selected) >= target_count:
         return selected
 
     # Step 2: Get families sorted by area and colors by family/lightness
-    families_by_area = _get_family_by_area(colors)
-    colors_by_family = _get_colors_by_family_and_lightness(colors)
+    # Use for_glow=True for permissive thresholds
+    families_by_area = _get_family_by_area(colors, for_glow=True)
+    colors_by_family = _get_colors_by_family_and_lightness(colors, for_glow=True)
 
     # Track which colors have been used
     used_colors = set(id(c) for c in selected)
@@ -502,22 +595,25 @@ def _select_luminous_colors(
        - Distance to selected colors (DIVERSE component)
        - Lightness weighted by family frequency (GLOW component)
 
+    Uses permissive saturation thresholds (for_glow=True) to include
+    light colors that still have discernible hue.
+
     Args:
-        colors: List of chromatic colors.
+        colors: List of chromatic colors (should be chromatic_colors_glow).
         target_count: Number of colors to select.
 
     Returns:
         List of selected colors.
     """
-    # Step 1: Get family anchors
-    family_anchors = _get_family_anchors(colors)
+    # Step 1: Get family anchors (use for_glow=True for permissive thresholds)
+    family_anchors = _get_family_anchors(colors, for_glow=True)
     selected = family_anchors[:target_count]
 
     if len(selected) >= target_count:
         return selected
 
-    # Get family areas for weighting
-    families_by_area = _get_family_by_area(colors)
+    # Get family areas for weighting (use for_glow=True)
+    families_by_area = _get_family_by_area(colors, for_glow=True)
     family_rank = {f: i for i, f in enumerate(families_by_area)}
     max_rank = len(families_by_area)
 
@@ -538,7 +634,7 @@ def _select_luminous_colors(
 
             # GLOW component: lightness weighted by family rank
             lightness = _get_color_lightness(*candidate.rgb) / 100.0
-            family = _get_color_family(candidate.rgb)
+            family = _get_color_family(candidate.rgb, for_glow=True)
             rank = family_rank.get(family, max_rank)
             # Higher rank = less frequent = lower weight
             frequency_weight = 1.0 - (rank / (max_rank + 1))
@@ -787,6 +883,7 @@ class PaletteExtractor:
         # These are covered by the shades layer and shouldn't be in color palette
         all_colors = []
         chromatic_colors = []  # Colors with good saturation and valid names
+        chromatic_colors_glow = []  # Extended pool for GLOW/LUMINOUS (more permissive)
 
         for i, color in enumerate(all_cluster_colors):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
@@ -796,12 +893,22 @@ class PaletteExtractor:
             if _is_pure_black_white_gray(r, g, b):
                 continue
 
+            # Filter out extreme lightness (L>95% or L<5%) - these belong to shades layer
+            if _is_extreme_lightness(r, g, b):
+                continue
+
             color_info = ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1)
             all_colors.append(color_info)
 
             # Track chromatic colors (good saturation, valid name - NOT gray/white/black)
+            # Standard threshold for most methods
             if not _is_low_saturation(r, g, b, threshold=20.0) and not _is_invalid_color_by_name(color_info.name):
                 chromatic_colors.append(color_info)
+
+            # Extended pool for GLOW/LUMINOUS: use dynamic thresholds that allow
+            # lighter colors with lower saturation (they're still chromatic!)
+            if _is_chromatic_dynamic(r, g, b, for_glow=True) and not _is_invalid_color_by_name(color_info.name):
+                chromatic_colors_glow.append(color_info)
 
         # =====================================================================
         # ALL METHODS: Use 7-family approach for maximum color diversity
@@ -869,16 +976,19 @@ class PaletteExtractor:
         elif self.settings.palette_method == PaletteMethod.GLOW:
             # GLOW: Start with family anchors, then fill with LIGHTEST colors
             # cycling through families by frequency (most frequent first)
+            # Uses extended color pool with more permissive saturation thresholds
+            # to find light but still chromatic colors
             colors = _select_glow_colors(
-                chromatic_colors if chromatic_colors else all_colors,
+                chromatic_colors_glow if chromatic_colors_glow else all_colors,
                 self.settings.num_colors,
             )
 
         elif self.settings.palette_method == PaletteMethod.LUMINOUS:
             # LUMINOUS: Compromise between DIVERSE and GLOW
             # Balances maximum contrast with lightness/frequency
+            # Uses extended color pool with more permissive saturation thresholds
             colors = _select_luminous_colors(
-                chromatic_colors if chromatic_colors else all_colors,
+                chromatic_colors_glow if chromatic_colors_glow else all_colors,
                 self.settings.num_colors,
             )
 
