@@ -231,68 +231,51 @@ class SettingsPanel(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        # Values (Grayscale levels) group
+        # Values (Grayscale levels) group - min 2, max 12
         values_group = QGroupBox("Graustufen (Values)")
         values_layout = QHBoxLayout(values_group)
 
         self._values_slider = QSlider(Qt.Orientation.Horizontal)
-        self._values_slider.setRange(3, 12)
+        self._values_slider.setRange(2, 12)
         self._values_slider.setValue(5)
         self._values_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._values_slider.setTickInterval(1)
 
         self._values_spinbox = QSpinBox()
-        self._values_spinbox.setRange(3, 12)
+        self._values_spinbox.setRange(2, 12)
         self._values_spinbox.setValue(5)
+        self._values_spinbox.setToolTip("Direkte Eingabe möglich (2-12)")
 
-        values_layout.addWidget(QLabel("3"))
+        values_layout.addWidget(QLabel("2"))
         values_layout.addWidget(self._values_slider)
         values_layout.addWidget(QLabel("12"))
         values_layout.addWidget(self._values_spinbox)
 
         layout.addWidget(values_group)
 
-        # Steps (Color levels) group
+        # Steps (Color levels) group - min 2, max 24, increments of 1
         steps_group = QGroupBox("Farbstufen (Steps)")
         steps_layout = QHBoxLayout(steps_group)
 
         self._steps_slider = QSlider(Qt.Orientation.Horizontal)
-        self._steps_slider.setRange(1, 8)  # 3, 6, 9, 12, 15, 18, 21, 24
-        self._steps_slider.setValue(3)  # Default 9
+        self._steps_slider.setRange(2, 24)
+        self._steps_slider.setValue(9)
         self._steps_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._steps_slider.setTickInterval(1)
 
         self._steps_spinbox = QSpinBox()
-        self._steps_spinbox.setRange(3, 24)
-        self._steps_spinbox.setSingleStep(3)
+        self._steps_spinbox.setRange(2, 24)
+        self._steps_spinbox.setSingleStep(1)
         self._steps_spinbox.setValue(9)
+        self._steps_spinbox.setToolTip("Direkte Eingabe möglich (2-24)")
 
-        steps_layout.addWidget(QLabel("3"))
+        steps_layout.addWidget(QLabel("2"))
         steps_layout.addWidget(self._steps_slider)
         steps_layout.addWidget(QLabel("24"))
         steps_layout.addWidget(self._steps_spinbox)
 
         layout.addWidget(steps_group)
 
-        # Edge Sensitivity group
-        edge_group = QGroupBox("Kantensensitivität")
-        edge_layout = QHBoxLayout(edge_group)
-
-        self._edge_slider = QSlider(Qt.Orientation.Horizontal)
-        self._edge_slider.setRange(0, 100)
-        self._edge_slider.setValue(50)
-        self._edge_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._edge_slider.setTickInterval(10)
-
-        self._edge_label = QLabel("50%")
-        self._edge_label.setMinimumWidth(40)
-
-        edge_layout.addWidget(QLabel("Fein"))
-        edge_layout.addWidget(self._edge_slider)
-        edge_layout.addWidget(QLabel("Grob"))
-        edge_layout.addWidget(self._edge_label)
-
-        layout.addWidget(edge_group)
 
         # Palette sorting options
         sort_group = QGroupBox("Paletten-Optionen")
@@ -331,7 +314,7 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(sort_group)
 
-        # Outline options
+        # Outline options (including edge sensitivity)
         outline_group = QGroupBox("Konturenerkennung")
         outline_layout = QVBoxLayout(outline_group)
 
@@ -352,6 +335,25 @@ class SettingsPanel(QWidget):
         )
         source_row.addWidget(self._outline_source_combo)
         outline_layout.addLayout(source_row)
+
+        # Edge sensitivity slider (moved here, labels fixed: 0%=Grob, 100%=Fein)
+        edge_row = QHBoxLayout()
+        edge_row.addWidget(QLabel("Sensitivität:"))
+        self._edge_slider = QSlider(Qt.Orientation.Horizontal)
+        self._edge_slider.setRange(0, 100)
+        self._edge_slider.setValue(50)
+        self._edge_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._edge_slider.setTickInterval(10)
+        self._edge_slider.setToolTip(
+            "0% = Grob (wenige Kanten)\n100% = Fein (viele Kanten)"
+        )
+        self._edge_label = QLabel("50%")
+        self._edge_label.setMinimumWidth(40)
+        edge_row.addWidget(QLabel("Grob"))
+        edge_row.addWidget(self._edge_slider)
+        edge_row.addWidget(QLabel("Fein"))
+        edge_row.addWidget(self._edge_label)
+        outline_layout.addLayout(edge_row)
 
         # Minimum contour length slider
         min_len_row = QHBoxLayout()
@@ -437,8 +439,9 @@ class SettingsPanel(QWidget):
         self._values_spinbox.valueChanged.connect(self._values_slider.setValue)
         self._values_spinbox.valueChanged.connect(lambda: self.settings_changed.emit())
 
-        self._steps_slider.valueChanged.connect(self._on_steps_slider_changed)
-        self._steps_spinbox.valueChanged.connect(self._on_steps_spinbox_changed)
+        self._steps_slider.valueChanged.connect(self._steps_spinbox.setValue)
+        self._steps_spinbox.valueChanged.connect(self._steps_slider.setValue)
+        self._steps_spinbox.valueChanged.connect(lambda: self.settings_changed.emit())
 
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
 
@@ -455,27 +458,6 @@ class SettingsPanel(QWidget):
         # Folder browser buttons
         self._source_folder_btn.clicked.connect(self._browse_source_folder)
         self._export_folder_btn.clicked.connect(self._browse_export_folder)
-
-    def _on_steps_slider_changed(self, value: int) -> None:
-        steps_value = value * 3  # Convert to multiple of 3
-        self._steps_spinbox.blockSignals(True)
-        self._steps_spinbox.setValue(steps_value)
-        self._steps_spinbox.blockSignals(False)
-        self.settings_changed.emit()
-
-    def _on_steps_spinbox_changed(self, value: int) -> None:
-        # Round to nearest multiple of 3
-        value = round(value / 3) * 3
-        value = max(3, min(24, value))
-        self._steps_spinbox.blockSignals(True)
-        self._steps_spinbox.setValue(value)
-        self._steps_spinbox.blockSignals(False)
-
-        slider_value = value // 3
-        self._steps_slider.blockSignals(True)
-        self._steps_slider.setValue(slider_value)
-        self._steps_slider.blockSignals(False)
-        self.settings_changed.emit()
 
     def _on_edge_changed(self, value: int) -> None:
         self._edge_label.setText(f"{value}%")

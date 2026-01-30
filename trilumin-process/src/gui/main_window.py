@@ -79,6 +79,8 @@ class ProcessingWorker(QThread):
                 results["abstracted"] = None
 
             # Process palette FIRST (needed for outlines from posterized)
+            # IMPORTANT: Extract palette from ORIGINAL image to ensure consistent colors
+            # regardless of abstraction settings. Only Method and Farbstufen should affect palette.
             self.progress.emit("Extrahiere Farbpalette...")
             palette_settings = PaletteSettings(
                 num_colors=opts.num_colors,
@@ -87,7 +89,9 @@ class ProcessingWorker(QThread):
                 palette_method=opts.palette_method,
             )
             palette_extractor = PaletteExtractor(palette_settings)
-            results["colors"] = palette_extractor.extract_palette(working_image)
+            # Use ORIGINAL image for palette extraction (not working_image)
+            results["colors"] = palette_extractor.extract_palette(self.image)
+            # But use working_image for posterization (shows abstraction effect)
             results["posterized"] = palette_extractor.create_posterized_image(
                 working_image, add_numbers=opts.add_numbers
             )
@@ -154,24 +158,32 @@ class ProcessingWorker(QThread):
                 grayscales=results["grayscale_levels"],
             )
 
-            # Create composite overlay: Shades (100%) + Colors (50%)
+            # Create composite overlay: Colors with Shades luminosity applied
+            # Preserves color saturation while applying value structure
             self.progress.emit("Erstelle Überlagerung...")
             shades_no_numbers = shade_quantizer.quantize(working_image, add_numbers=False)
             colors_no_numbers = palette_extractor.create_posterized_image(
                 working_image, add_numbers=False
             )
-            # Convert shades to BGR if grayscale
+
             import cv2
+
+            # Convert shades to single channel luminosity
             if len(shades_no_numbers.shape) == 2:
-                shades_bgr = cv2.cvtColor(shades_no_numbers, cv2.COLOR_GRAY2BGR)
+                luminosity = shades_no_numbers.astype(np.float32) / 255.0
             else:
-                shades_bgr = shades_no_numbers
-            # Blend: shades as base, colors at 50% opacity on top
-            results["composite"] = cv2.addWeighted(
-                shades_bgr, 0.5,  # Base layer at 50%
-                colors_no_numbers, 0.5,  # Top layer at 50%
-                0  # No additional brightness
-            )
+                luminosity = cv2.cvtColor(shades_no_numbers, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+            # Convert colors to HSV to preserve hue and saturation
+            colors_hsv = cv2.cvtColor(colors_no_numbers, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+            # Apply shades as value channel (luminosity blend)
+            # This preserves color hue and saturation while using shade structure
+            colors_hsv[:, :, 2] = luminosity * 255.0
+
+            # Convert back to BGR
+            colors_hsv = np.clip(colors_hsv, 0, 255).astype(np.uint8)
+            results["composite"] = cv2.cvtColor(colors_hsv, cv2.COLOR_HSV2BGR)
 
             self.finished.emit(results)
 

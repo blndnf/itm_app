@@ -26,7 +26,7 @@ class ShadeQuantizer:
     planning oil painting value studies.
     """
 
-    MIN_VALUES = 3
+    MIN_VALUES = 2
     MAX_VALUES = 12
 
     def __init__(self, settings: Optional[ShadeSettings] = None):
@@ -93,7 +93,7 @@ class ShadeQuantizer:
         if self._levels is None:
             return cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
 
-        # For each gray level, find and label regions
+        # For each gray level, find and label only the LARGEST region
         for i, level in enumerate(self._levels):
             # Create mask for this gray level
             mask = (quantized == level).astype(np.uint8)
@@ -103,54 +103,59 @@ class ShadeQuantizer:
                 mask, connectivity=8
             )
 
-            # For each component (skip background label 0)
+            # Find the LARGEST component for this shade (only show ONE number per shade)
+            best_label_id = -1
+            best_area = 0
+
             for label_id in range(1, num_labels):
                 area = stats[label_id, cv2.CC_STAT_AREA]
-                if area < self.settings.min_region_size:
-                    continue
+                if area > best_area:
+                    best_area = area
+                    best_label_id = label_id
 
-                # Get centroid
-                cx, cy = centroids[label_id]
-                cx, cy = int(cx), int(cy)
+            # Only draw number if largest region meets minimum size
+            if best_label_id < 0 or best_area < self.settings.min_region_size:
+                continue
 
-                # Determine text color (white on dark, black on light)
-                lv = int(level)  # Convert to Python int for OpenCV
-                tc = get_text_color_for_background((lv, lv, lv))
-                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
+            # Get centroid of largest region
+            cx, cy = centroids[best_label_id]
+            cx, cy = int(cx), int(cy)
 
-                # Calculate font scale based on image size and region area
-                # Base scale proportional to image diagonal (reference: 1500px = 1.0)
-                image_diagonal = (width**2 + height**2) ** 0.5
-                base_scale = image_diagonal / 1500.0
+            # Determine text color (white on dark, black on light)
+            lv = int(level)
+            tc = get_text_color_for_background((lv, lv, lv))
+            text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-                # Area factor: larger regions get slightly larger text
-                image_area = width * height
-                area_factor = min(1.3, max(0.7, (area / (image_area * 0.01)) ** 0.3))
+            # Calculate font scale based on image size and region area
+            image_diagonal = (width**2 + height**2) ** 0.5
+            base_scale = image_diagonal / 1500.0
 
-                # Final scale, clamped to reasonable range
-                font_scale = min(2.5, max(0.4, base_scale * area_factor))
-                thickness = max(1, int(font_scale * 2))
+            image_area = width * height
+            area_factor = min(1.3, max(0.7, (best_area / (image_area * 0.01)) ** 0.3))
 
-                # Draw Roman numeral
-                roman = int_to_roman(i + 1)
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    roman, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                )
+            font_scale = min(2.5, max(0.4, base_scale * area_factor))
+            thickness = max(1, int(font_scale * 2))
 
-                # Center text
-                text_x = max(0, min(width - text_width, cx - text_width // 2))
-                text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+            # Draw Roman numeral
+            roman = int_to_roman(i + 1)
+            (text_width, text_height), baseline = cv2.getTextSize(
+                roman, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
 
-                cv2.putText(
-                    result,
-                    roman,
-                    (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale,
-                    text_color,
-                    thickness,
-                    cv2.LINE_AA,
-                )
+            # Center text
+            text_x = max(0, min(width - text_width, cx - text_width // 2))
+            text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+
+            cv2.putText(
+                result,
+                roman,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                text_color,
+                thickness,
+                cv2.LINE_AA,
+            )
 
         # Convert back to grayscale
         return cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)

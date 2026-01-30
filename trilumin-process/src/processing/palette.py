@@ -140,9 +140,10 @@ def sort_palette(
     return sorted_colors
 
 
-def _is_pure_black_white_gray(r: int, g: int, b: int, tolerance: int = 5) -> bool:
+def _is_pure_black_white_gray(r: int, g: int, b: int, tolerance: int = 10) -> bool:
     """
     Check if a color is pure black, pure white, or pure gray.
+    These should be excluded as they are covered by the shades layer.
 
     Args:
         r, g, b: RGB values.
@@ -156,15 +157,23 @@ def _is_pure_black_white_gray(r: int, g: int, b: int, tolerance: int = 5) -> boo
     if max_diff > tolerance:
         return False  # Has color, not a pure gray
 
-    # It's a grayscale color - check if pure black or pure white
-    avg = (r + g + b) // 3
-    if avg <= tolerance:  # Pure black
-        return True
-    if avg >= 255 - tolerance:  # Pure white
-        return True
-
-    # It's a gray (covered by shades)
+    # It's a grayscale color - covered by shades
     return True
+
+
+def _is_low_saturation(r: int, g: int, b: int, threshold: float = 20.0) -> bool:
+    """
+    Check if a color has low saturation (grayish).
+
+    Args:
+        r, g, b: RGB values.
+        threshold: Minimum saturation percentage to be considered chromatic.
+
+    Returns:
+        True if saturation is below threshold.
+    """
+    _, s, _ = _get_hsl((r, g, b))
+    return s < threshold
 
 
 def _is_gray_color_name(name: str) -> bool:
@@ -211,13 +220,14 @@ def _color_distance_hsl(c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> f
 def _select_diverse_colors(
     colors: List[ColorInfo],
     target_count: int,
-    min_saturation: float = 15.0,
+    min_saturation: float = 25.0,
 ) -> List[ColorInfo]:
     """
     Select a diverse subset of colors maximizing contrast.
 
     Uses a greedy algorithm to pick colors that are maximally
     distant from already selected colors in HSL space.
+    Strongly prefers saturated colors to preserve vibrancy.
 
     Args:
         colors: List of candidate colors.
@@ -230,32 +240,34 @@ def _select_diverse_colors(
     if len(colors) <= target_count:
         return colors
 
-    # Separate into chromatic and achromatic
+    # Separate into chromatic and achromatic, with stricter filtering
     chromatic = []
+    low_saturation = []
     achromatic = []
 
     for c in colors:
         h, s, l = _get_hsl(c.rgb)
-        # Filter by saturation AND by name
-        if s >= min_saturation and not _is_gray_color_name(c.name):
+        # Filter by saturation AND by name - NO grays in the palette!
+        if _is_gray_color_name(c.name):
+            achromatic.append(c)
+        elif s >= min_saturation:
             chromatic.append(c)
+        elif s >= 15.0:  # Slightly desaturated but still colorful
+            low_saturation.append(c)
         else:
             achromatic.append(c)
 
-    # If not enough chromatic colors, relax constraints
-    if len(chromatic) < target_count:
-        # Add less saturated but still colored ones
-        for c in colors:
-            if c not in chromatic and c not in achromatic:
-                chromatic.append(c)
-            if len(chromatic) >= target_count:
-                break
+    if not chromatic:
+        # No highly saturated colors, use low saturation ones
+        chromatic = low_saturation
+        low_saturation = []
 
     if not chromatic:
         # Fallback: use all colors sorted by saturation
-        return sorted(colors, key=lambda c: _get_color_saturation(*c.rgb), reverse=True)[:target_count]
+        all_sorted = sorted(colors, key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+        return all_sorted[:target_count]
 
-    # Greedy selection: start with most saturated color
+    # Greedy selection: start with most saturated color for maximum vibrancy
     chromatic.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
     selected = [chromatic[0]]
     remaining = chromatic[1:]
@@ -263,7 +275,7 @@ def _select_diverse_colors(
     while len(selected) < target_count and remaining:
         # Find color most distant from all selected colors
         best_color = None
-        best_min_dist = -1
+        best_score = -1
 
         for candidate in remaining:
             # Minimum distance to any selected color
@@ -271,8 +283,12 @@ def _select_diverse_colors(
                 _color_distance_hsl(candidate.rgb, sel.rgb)
                 for sel in selected
             )
-            if min_dist > best_min_dist:
-                best_min_dist = min_dist
+            # Bonus for saturation to prefer vibrant colors
+            sat_bonus = _get_color_saturation(*candidate.rgb) / 200.0
+            score = min_dist + sat_bonus
+
+            if score > best_score:
+                best_score = score
                 best_color = candidate
 
         if best_color:
@@ -281,10 +297,12 @@ def _select_diverse_colors(
         else:
             break
 
-    # If still not enough, add remaining chromatic or achromatic
-    while len(selected) < target_count and remaining:
-        selected.append(remaining.pop(0))
+    # If still not enough, add low saturation colors
+    while len(selected) < target_count and low_saturation:
+        low_saturation.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+        selected.append(low_saturation.pop(0))
 
+    # Last resort: add achromatic (but this should rarely happen)
     while len(selected) < target_count and achromatic:
         selected.append(achromatic.pop(0))
 
@@ -299,7 +317,7 @@ class PaletteExtractor:
     suitable for oil painting color planning.
     """
 
-    VALID_STEPS = [3, 6, 9, 12, 15, 18, 21, 24]  # Multiples of 3, min 3
+    VALID_STEPS = list(range(2, 25))  # 2 to 24, any increment
 
     def __init__(self, settings: Optional[PaletteSettings] = None):
         """
@@ -319,8 +337,7 @@ class PaletteExtractor:
     def _validate_settings(self) -> None:
         """Ensure settings are within valid range."""
         num_colors = self.settings.num_colors
-        num_colors = max(3, min(24, num_colors))  # Minimum 3 colors
-        num_colors = round(num_colors / 3) * 3
+        num_colors = max(2, min(24, num_colors))  # Minimum 2 colors, max 24
         self.settings.num_colors = num_colors
 
     def extract_palette(self, image: np.ndarray) -> List[ColorInfo]:
@@ -388,42 +405,65 @@ class PaletteExtractor:
         percentages = {label: count / total_pixels * 100 for label, count in zip(unique, counts)}
 
         # Create ColorInfo list, filtering out pure black/white/gray
+        # These are covered by the shades layer and shouldn't be in color palette
         all_colors = []
+        chromatic_colors = []  # Colors with good saturation
+
         for i, color in enumerate(all_cluster_colors):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
             pct = percentages.get(i, 0.0)
 
-            # Filter out pure black, white, and grays
+            # Filter out pure black, white, and grays (covered by shades)
             if _is_pure_black_white_gray(r, g, b):
                 continue
 
-            all_colors.append(ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1))
+            color_info = ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1)
+            all_colors.append(color_info)
+
+            # Track chromatic colors (good saturation, not gray-named)
+            if not _is_low_saturation(r, g, b, threshold=25.0) and not _is_gray_color_name(color_info.name):
+                chromatic_colors.append(color_info)
 
         # Select colors based on method
         if self.settings.palette_method == PaletteMethod.DIVERSE:
             # Maximize color diversity - pick most distinct colors
+            # Use chromatic colors first, with increased saturation threshold
             colors = _select_diverse_colors(
                 all_colors,
                 self.settings.num_colors,
-                min_saturation=15.0,
+                min_saturation=25.0,  # Increased from 15.0 for better color quality
             )
         elif self.settings.palette_method == PaletteMethod.SATURATED:
-            # Filter out gray-named colors, then sort by saturation
-            chromatic = [c for c in all_colors if not _is_gray_color_name(c.name)]
-            chromatic.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-            colors = chromatic[: self.settings.num_colors]
-            # Fill with remaining if not enough
+            # Prioritize MOST saturated colors - preserve original vibrancy!
+            # Filter by saturation value AND name to avoid any grays
+            saturated = [c for c in chromatic_colors
+                        if _get_color_saturation(*c.rgb) >= 30.0]
+            saturated.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+            colors = saturated[: self.settings.num_colors]
+
+            # Fill with remaining chromatic if not enough
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in chromatic_colors if c not in colors]
+                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+                colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+            # Last resort: fill with any remaining colors
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in all_colors if c not in colors]
+                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
         else:
-            # STANDARD: Original behavior - by percentage
-            colors = [c for c in all_colors if not _is_gray_color_name(c.name)]
-            colors.sort(key=lambda c: c.percentage, reverse=True)
-            colors = colors[: self.settings.num_colors]
+            # STANDARD: Original behavior - by percentage, but filter grays
+            standard_colors = [c for c in all_colors
+                             if not _is_gray_color_name(c.name)
+                             and not _is_low_saturation(*c.rgb, threshold=20.0)]
+            standard_colors.sort(key=lambda c: c.percentage, reverse=True)
+            colors = standard_colors[: self.settings.num_colors]
+
             # Fill with remaining if not enough
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in all_colors if c not in colors]
+                remaining.sort(key=lambda c: c.percentage, reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
         # Store colors for posterization
@@ -539,55 +579,59 @@ class PaletteExtractor:
                 mask, connectivity=8
             )
 
-            # For each component (skip background label 0)
+            # Find the LARGEST component for this color (only show ONE number per color)
+            best_label_id = -1
+            best_area = 0
+
             for label_id in range(1, num_labels):
                 area = stats[label_id, cv2.CC_STAT_AREA]
-                if area < min_region_size:
-                    continue
+                if area > best_area:
+                    best_area = area
+                    best_label_id = label_id
 
-                # Get centroid
-                cx, cy = centroids[label_id]
-                cx, cy = int(cx), int(cy)
+            # Only draw number if largest region meets minimum size
+            if best_label_id < 0 or best_area < min_region_size:
+                continue
 
-                # Determine text color based on background luminance
-                # Convert numpy types to Python int for OpenCV compatibility
-                color_int = (int(color_tuple[0]), int(color_tuple[1]), int(color_tuple[2]))
-                tc = get_text_color_for_background(color_int)
-                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
+            # Get centroid of largest region
+            cx, cy = centroids[best_label_id]
+            cx, cy = int(cx), int(cy)
 
-                # Calculate font scale based on image size and region area
-                # Base scale proportional to image diagonal (reference: 1500px = 1.0)
-                image_diagonal = (width**2 + height**2) ** 0.5
-                base_scale = image_diagonal / 1500.0
+            # Determine text color based on background luminance
+            color_int = (int(color_tuple[0]), int(color_tuple[1]), int(color_tuple[2]))
+            tc = get_text_color_for_background(color_int)
+            text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-                # Area factor: larger regions get slightly larger text
-                image_area = width * height
-                area_factor = min(1.3, max(0.7, (area / (image_area * 0.01)) ** 0.3))
+            # Calculate font scale based on image size and region area
+            image_diagonal = (width**2 + height**2) ** 0.5
+            base_scale = image_diagonal / 1500.0
 
-                # Final scale, clamped to reasonable range
-                font_scale = min(2.5, max(0.4, base_scale * area_factor))
-                thickness = max(1, int(font_scale * 2))
+            image_area = width * height
+            area_factor = min(1.3, max(0.7, (best_area / (image_area * 0.01)) ** 0.3))
 
-                # Draw number
-                text = str(number)
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                )
+            font_scale = min(2.5, max(0.4, base_scale * area_factor))
+            thickness = max(1, int(font_scale * 2))
 
-                # Center text
-                text_x = max(0, min(width - text_width, cx - text_width // 2))
-                text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+            # Draw number
+            text = str(number)
+            (text_width, text_height), baseline = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
 
-                cv2.putText(
-                    result,
-                    text,
-                    (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale,
-                    text_color,
-                    thickness,
-                    cv2.LINE_AA,
-                )
+            # Center text
+            text_x = max(0, min(width - text_width, cx - text_width // 2))
+            text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+
+            cv2.putText(
+                result,
+                text,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                text_color,
+                thickness,
+                cv2.LINE_AA,
+            )
 
         return result
 
@@ -612,177 +656,157 @@ class PaletteExtractor:
         self,
         colors: List[ColorInfo],
         swatch_size: int = 60,
-        cols: int = 0,  # 0 = auto-calculate for DIN A4 ratio
+        cols: int = 0,  # Ignored - now uses fixed A4 landscape grid
         show_name: bool = True,
         show_number: bool = True,
         grayscales: Optional[List[int]] = None,
+        for_export: bool = False,
     ) -> np.ndarray:
         """
         Create a visual palette image with color swatches.
 
+        Layout: A4 landscape format
+        - Upper 3/4: 6 columns x 4 rows = 24 slots for colors
+        - Lower 1/4: 12 columns x 1 row = 12 slots for shades
+        - Numbers AND names are written INSIDE each tile
+        - Unused slots are simply not drawn
+
         Uses PIL for text rendering to support Unicode (Umlauts).
 
         Args:
-            colors: List of ColorInfo objects.
-            swatch_size: Size of each color swatch in pixels.
-            cols: Number of columns (0 = auto for DIN A4 landscape ratio).
+            colors: List of ColorInfo objects (max 24).
+            swatch_size: Base size for calculations (scales the entire image).
+            cols: Ignored - uses fixed 6 columns for colors.
             show_name: Whether to show color names.
             show_number: Whether to show numbers on swatches.
-            grayscales: Optional list of grayscale values to add below.
+            grayscales: Optional list of grayscale values (max 12).
+            for_export: If True, use white background for printing.
 
         Returns:
             RGB image of the color palette.
         """
-        num_colors = len(colors)
+        # Fixed A4 landscape grid layout
+        COLOR_COLS = 6
+        COLOR_ROWS = 4
+        SHADE_COLS = 12
 
-        # Scale factor for fonts/margins (reference: swatch_size=60)
-        scale_factor = swatch_size / 60.0
+        # Calculate dimensions for A4 landscape ratio (297mm x 210mm = 1.414:1)
+        # Color tiles take up 3/4 of height, shades take 1/4
+        color_tile_size = swatch_size
+        shade_tile_height = swatch_size // 3  # Shades are shorter
 
-        # Text height for layout calculation (scaled for 3x larger fonts)
-        text_height = int(105 * scale_factor) if show_name else 0
-        margin = max(2, int(3 * scale_factor))
-        padding = int(8 * scale_factor)
+        # Image dimensions
+        img_width = COLOR_COLS * color_tile_size
+        img_height = COLOR_ROWS * color_tile_size + shade_tile_height
+        shade_tile_width = img_width // SHADE_COLS
 
-        cell_height = swatch_size + text_height + padding
-        cell_width = swatch_size
+        # Background color: gray for display, white for export
+        bg_color = (255, 255, 255) if for_export else (50, 50, 50)
+        palette_img = np.ones((img_height, img_width, 3), dtype=np.uint8)
+        palette_img[:, :] = bg_color
 
-        # Auto-calculate columns for DIN A4 landscape ratio (1.414:1)
-        if cols <= 0:
-            target_ratio = 1.414
-            gray_row_height = (swatch_size // 2 + text_height + int(20 * scale_factor)) if grayscales else 0
+        margin = max(2, swatch_size // 30)
+        border_thickness = max(1, swatch_size // 60)
 
-            best_cols = 3
-            best_diff = float('inf')
-            for test_cols in range(3, min(num_colors + 1, 12)):
-                test_rows = (num_colors + test_cols - 1) // test_cols
-                test_width = test_cols * cell_width
-                test_height = test_rows * cell_height + gray_row_height
-                ratio = test_width / test_height if test_height > 0 else 0
-                diff = abs(ratio - target_ratio)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_cols = test_cols
-            cols = best_cols
-
-        rows = (num_colors + cols - 1) // cols
-
-        # Grayscale section
-        gray_section_height = 0
-        gray_swatch_height = swatch_size // 2
-        if grayscales:
-            gray_section_height = gray_swatch_height + text_height + int(20 * scale_factor)
-
-        # Create image with dark gray background
-        width = cols * cell_width
-        height = rows * cell_height + gray_section_height
-        palette_img = np.ones((height, width, 3), dtype=np.uint8) * 50
-
-        border_thickness = max(1, int(scale_factor))
-
-        # Draw color swatches using OpenCV
-        for i, color_info in enumerate(colors):
-            row = i // cols
-            col = i % cols
-            x = col * cell_width
-            y = row * cell_height
+        # Draw color tiles (6x4 grid, upper portion)
+        for i, color_info in enumerate(colors[:24]):  # Max 24 colors
+            row = i // COLOR_COLS
+            col = i % COLOR_COLS
+            x = col * color_tile_size
+            y = row * color_tile_size
 
             r, g, b = color_info.rgb
             color_tuple = (int(r), int(g), int(b))
+
+            # Fill tile
             cv2.rectangle(
                 palette_img,
                 (x + margin, y + margin),
-                (x + swatch_size - margin, y + swatch_size - margin),
+                (x + color_tile_size - margin, y + color_tile_size - margin),
                 color_tuple,
                 -1,
             )
+            # Border
             cv2.rectangle(
                 palette_img,
                 (x + margin, y + margin),
-                (x + swatch_size - margin, y + swatch_size - margin),
+                (x + color_tile_size - margin, y + color_tile_size - margin),
                 (100, 100, 100),
                 border_thickness,
             )
 
-        # Draw grayscale swatches if provided
+        # Draw shade tiles (12x1 grid, bottom portion)
         if grayscales:
-            separator_y = rows * cell_height + int(8 * scale_factor)
-            line_thickness = max(1, int(scale_factor))
-            line_margin = int(5 * scale_factor)
-            cv2.line(
-                palette_img,
-                (line_margin, separator_y),
-                (width - line_margin, separator_y),
-                (100, 100, 100),
-                line_thickness,
-            )
+            shade_y = COLOR_ROWS * color_tile_size
 
-            gray_y = separator_y + int(8 * scale_factor)
-            num_grays = len(grayscales)
-            gray_swatch_width = (width - 2 * line_margin) // num_grays
-
-            for i, gray_val in enumerate(grayscales):
-                gx = line_margin + i * gray_swatch_width
+            for i, gray_val in enumerate(grayscales[:12]):  # Max 12 shades
+                gx = i * shade_tile_width
                 gv = int(gray_val)
+
+                # Fill tile
                 cv2.rectangle(
                     palette_img,
-                    (gx + margin, gray_y + margin),
-                    (gx + gray_swatch_width - margin, gray_y + gray_swatch_height - margin),
+                    (gx + margin, shade_y + margin),
+                    (gx + shade_tile_width - margin, shade_y + shade_tile_height - margin),
                     (gv, gv, gv),
                     -1,
                 )
+                # Border
                 cv2.rectangle(
                     palette_img,
-                    (gx + margin, gray_y + margin),
-                    (gx + gray_swatch_width - margin, gray_y + gray_swatch_height - margin),
+                    (gx + margin, shade_y + margin),
+                    (gx + shade_tile_width - margin, shade_y + shade_tile_height - margin),
                     (100, 100, 100),
                     border_thickness,
                 )
 
-        # Convert to PIL Image for text rendering (supports Unicode)
+        # Convert to PIL for text rendering
         pil_image = Image.fromarray(palette_img)
         draw = ImageDraw.Draw(pil_image)
 
-        # Font sizes based on scale factor (3x larger for better readability)
-        number_font_size = max(16, int(72 * scale_factor))
-        name_font_size = max(12, int(54 * scale_factor))
-        gray_font_size = max(12, int(48 * scale_factor))
+        # Font sizes relative to tile size
+        number_font_size = max(16, color_tile_size // 3)
+        name_font_size = max(10, color_tile_size // 6)
+        shade_font_size = max(12, shade_tile_height // 3)
 
         number_font = self._get_font(number_font_size)
         name_font = self._get_font(name_font_size)
-        gray_font = self._get_font(gray_font_size)
+        shade_font = self._get_font(shade_font_size)
 
-        # Draw text on color swatches
-        for i, color_info in enumerate(colors):
-            row = i // cols
-            col = i % cols
-            x = col * cell_width
-            y = row * cell_height
+        # Draw text on color tiles (number AND name inside tile)
+        for i, color_info in enumerate(colors[:24]):
+            row = i // COLOR_COLS
+            col = i % COLOR_COLS
+            x = col * color_tile_size
+            y = row * color_tile_size
 
             r, g, b = color_info.rgb
+            tc = get_text_color_for_background((r, g, b))
+            text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-            # Draw number on swatch
+            tile_inner_width = color_tile_size - 2 * margin
+            tile_inner_height = color_tile_size - 2 * margin
+
+            # Draw number in upper portion of tile
             if show_number:
-                tc = get_text_color_for_background((r, g, b))
-                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 number_text = str(color_info.index)
-
                 bbox = draw.textbbox((0, 0), number_text, font=number_font)
                 tw = bbox[2] - bbox[0]
                 th = bbox[3] - bbox[1]
 
-                num_x = x + (swatch_size - tw) // 2
-                num_y = y + (swatch_size - th) // 2 - bbox[1]
+                num_x = x + margin + (tile_inner_width - tw) // 2
+                num_y = y + margin + tile_inner_height // 4 - th // 2
 
                 draw.text((num_x, num_y), number_text, fill=text_color, font=number_font)
 
-            # Draw name below swatch
+            # Draw name in lower portion of tile
             if show_name:
                 name = color_info.name
-                max_text_width = swatch_size - int(10 * scale_factor)
+                max_text_width = tile_inner_width - 10
 
+                # Shrink font if name too long
                 current_font = name_font
                 current_size = name_font_size
-
                 bbox = draw.textbbox((0, 0), name, font=current_font)
                 tw = bbox[2] - bbox[0]
 
@@ -792,45 +816,40 @@ class PaletteExtractor:
                     bbox = draw.textbbox((0, 0), name, font=current_font)
                     tw = bbox[2] - bbox[0]
 
-                text_x = x + int(5 * scale_factor)
-                text_y = y + swatch_size + int(8 * scale_factor)
+                th = bbox[3] - bbox[1]
+                name_x = x + margin + (tile_inner_width - tw) // 2
+                name_y = y + margin + (tile_inner_height * 2) // 3
 
-                draw.text((text_x, text_y), name, fill=(220, 220, 220), font=current_font)
+                draw.text((name_x, name_y), name, fill=text_color, font=current_font)
 
-        # Draw Roman numerals on grayscale swatches
+        # Draw Roman numerals on shade tiles
         if grayscales:
             from utils.color_naming import int_to_roman
 
-            separator_y = rows * cell_height + int(8 * scale_factor)
-            gray_y = separator_y + int(8 * scale_factor)
-            line_margin = int(5 * scale_factor)
-            num_grays = len(grayscales)
-            gray_swatch_width = (width - 2 * line_margin) // num_grays
+            shade_y = COLOR_ROWS * color_tile_size
 
-            for i, gray_val in enumerate(grayscales):
-                gx = line_margin + i * gray_swatch_width
+            for i, gray_val in enumerate(grayscales[:12]):
+                gx = i * shade_tile_width
                 gv = int(gray_val)
 
                 tc = get_text_color_for_background((gv, gv, gv))
                 text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 roman = int_to_roman(i + 1)
 
-                bbox = draw.textbbox((0, 0), roman, font=gray_font)
+                bbox = draw.textbbox((0, 0), roman, font=shade_font)
                 tw = bbox[2] - bbox[0]
                 th = bbox[3] - bbox[1]
 
-                rx = gx + (gray_swatch_width - tw) // 2
-                ry = gray_y + (gray_swatch_height - th) // 2 - bbox[1]
+                rx = gx + (shade_tile_width - tw) // 2
+                ry = shade_y + (shade_tile_height - th) // 2 - bbox[1] // 2
 
-                draw.text((rx, ry), roman, fill=text_color, font=gray_font)
+                draw.text((rx, ry), roman, fill=text_color, font=shade_font)
 
-        # Convert back to numpy array
         return np.array(pil_image)
 
     def set_num_colors(self, num_colors: int) -> None:
         """Set the number of colors to extract."""
-        num_colors = max(3, min(24, num_colors))
-        num_colors = round(num_colors / 3) * 3
+        num_colors = max(2, min(24, num_colors))
         self.settings.num_colors = num_colors
         self._kmeans = None
         self._colors = None
