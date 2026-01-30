@@ -705,6 +705,19 @@ class AbstractionSettingsPanel(QWidget):
         )
         group_layout.addWidget(self._color_boost_checkbox)
 
+        # Palette source selection
+        palette_src_layout = QHBoxLayout()
+        palette_src_layout.addWidget(QLabel("Farb-Quelle:"))
+        self._palette_source_combo = QComboBox()
+        self._palette_source_combo.addItem("Original", "original")
+        self._palette_source_combo.addItem("Vorverarbeitet", "preprocessed")
+        self._palette_source_combo.setToolTip(
+            "Original: Farbpalette aus Originalbild extrahieren\n"
+            "Vorverarbeitet: Farbpalette aus vorverarbeitetem Bild extrahieren"
+        )
+        palette_src_layout.addWidget(self._palette_source_combo)
+        group_layout.addLayout(palette_src_layout)
+
         # Method selection
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Methode:"))
@@ -750,6 +763,9 @@ class AbstractionSettingsPanel(QWidget):
     def _connect_signals(self) -> None:
         self._enabled_checkbox.toggled.connect(self._on_enabled_changed)
         self._color_boost_checkbox.toggled.connect(lambda: self.settings_changed.emit())
+        self._palette_source_combo.currentIndexChanged.connect(
+            lambda: self.settings_changed.emit()
+        )
         self._method_combo.currentIndexChanged.connect(
             lambda: self.settings_changed.emit()
         )
@@ -771,6 +787,10 @@ class AbstractionSettingsPanel(QWidget):
     def is_color_boost_enabled(self) -> bool:
         """Check if color boost is enabled."""
         return self._color_boost_checkbox.isChecked()
+
+    def get_palette_source(self) -> str:
+        """Get the palette source ('original' or 'preprocessed')."""
+        return self._palette_source_combo.currentData()
 
     def get_method(self) -> AbstractionMethod:
         """Get the selected abstraction method."""

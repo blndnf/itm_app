@@ -50,6 +50,7 @@ class ProcessingOptions:
     min_contrast: int = 0
     abstraction_settings: Optional[AbstractionSettings] = None
     color_boost: bool = False
+    palette_source: str = "original"  # "original" or "preprocessed"
 
 
 class ProcessingWorker(QThread):
@@ -87,8 +88,9 @@ class ProcessingWorker(QThread):
                 results["abstracted"] = working_image if opts.color_boost else None
 
             # Process palette FIRST (needed for outlines from posterized)
-            # IMPORTANT: Extract palette from ORIGINAL image to ensure consistent colors
-            # regardless of abstraction settings. Only Method and Farbstufen should affect palette.
+            # Palette extraction source is based on user setting:
+            # - "original": Uses original image (consistent palette regardless of abstraction)
+            # - "preprocessed": Uses working_image (abstraction affects palette)
             self.progress.emit("Extrahiere Farbpalette...")
             palette_settings = PaletteSettings(
                 num_colors=opts.num_colors,
@@ -97,9 +99,19 @@ class ProcessingWorker(QThread):
                 palette_method=opts.palette_method,
             )
             palette_extractor = PaletteExtractor(palette_settings)
-            # Use ORIGINAL image for palette extraction (not working_image)
-            results["colors"] = palette_extractor.extract_palette(self.image)
-            # But use working_image for posterization (shows abstraction effect)
+
+            # Select palette source based on user setting
+            if opts.palette_source == "preprocessed":
+                palette_source_image = working_image
+            else:
+                # Default: use original image (color boost is always applied internally)
+                palette_source_image = self.image
+                # Apply color boost to palette source if enabled
+                if opts.color_boost:
+                    palette_source_image = apply_color_boost(self.image)
+
+            results["colors"] = palette_extractor.extract_palette(palette_source_image)
+            # Use working_image for posterization (shows abstraction effect)
             results["posterized"] = palette_extractor.create_posterized_image(
                 working_image, add_numbers=opts.add_numbers
             )
@@ -429,6 +441,7 @@ class MainWindow(QMainWindow):
             min_contrast=self._settings_panel.get_min_contrast(),
             abstraction_settings=abstraction_settings,
             color_boost=self._abstraction_panel.is_color_boost_enabled(),
+            palette_source=self._abstraction_panel.get_palette_source(),
         )
 
     def _process_image(self) -> None:

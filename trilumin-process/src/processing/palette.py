@@ -177,88 +177,195 @@ def _is_low_saturation(r: int, g: int, b: int, threshold: float = 20.0) -> bool:
     return s < threshold
 
 
-def _is_gray_color_name(name: str) -> bool:
-    """Check if a color name indicates a gray/black/white color."""
-    gray_terms = [
-        "schwarz", "grau", "weiß", "weiss", "anthrazit",
-        "black", "gray", "grey", "white", "charcoal",
-        "silver", "silber", "silbergrau", "ash", "slate", "graphit",
-        "dunkelgrau", "hellgrau", "mittelgrau", "warmgrau", "kaltgrau",
-        "schiefergrau", "eisgrau", "stahlgrau", "mausgrau", "aschgrau",
-    ]
-    name_lower = name.lower()
-    return any(term in name_lower for term in gray_terms)
+# The 7 artist color families for palette diversity
+COLOR_FAMILIES = ["rot", "orange", "gelb", "grün", "blau", "violett", "braun"]
 
 
-def _get_hue_category(rgb: Tuple[int, int, int]) -> str:
-    """Get the hue category name for a color."""
+def _get_color_family(rgb: Tuple[int, int, int]) -> str:
+    """
+    Get the color family for a color (7 artist families).
+
+    Families: rot, orange, gelb, grün, blau, violett, braun
+    Returns "gray" for low saturation colors.
+    """
+    r, g, b = rgb
     h, s, l = _get_hsl(rgb)
 
-    # Low saturation = gray
+    # Low saturation = gray (not a color family)
     if s < 15:
         return "gray"
 
-    # Categorize by hue
+    # Very dark and desaturated = could be brown
+    if l < 35 and s < 40:
+        # Check if it's warm (brownish) or cool
+        if 0 <= h < 50 or h >= 330:
+            return "braun"
+
+    # Detect brown: warm hues (red-orange-yellow range) with low-medium saturation and medium-low lightness
+    # Browns are typically: H=0-50, S=20-70, L=15-45
+    if (0 <= h < 50 or h >= 350) and s < 70 and 10 < l < 50:
+        # Additional check: browns have more red than blue
+        if r > b and (r - b) > 20:
+            return "braun"
+
+    # Categorize by hue angle (7 families, no cyan/magenta)
     if h < 15 or h >= 345:
         return "rot"
     elif h < 45:
         return "orange"
     elif h < 75:
         return "gelb"
-    elif h < 150:
+    elif h < 165:
         return "grün"
-    elif h < 210:
-        return "cyan"
     elif h < 270:
         return "blau"
-    elif h < 310:
+    elif h < 330:
         return "violett"
     else:
-        return "magenta"
+        return "rot"  # Wrap around to red
 
 
-def _check_hue_diversity(colors: List[ColorInfo]) -> bool:
+def _is_invalid_color_by_name(name: str) -> bool:
     """
-    Check if colors have good hue diversity.
+    Check if a color name indicates an invalid color (gray/white/black).
 
-    Returns False if >50% of colors share the same hue category.
+    These should be excluded from the color palette as they're covered by shades.
+    """
+    invalid_terms = [
+        "schwarz", "grau", "weiß", "weiss", "anthrazit",
+        "black", "gray", "grey", "white", "charcoal",
+        "silver", "silber", "ash", "slate", "graphit",
+    ]
+    name_lower = name.lower()
+    return any(term in name_lower for term in invalid_terms)
+
+
+def _blend_toward_valid_color(
+    invalid_color: Tuple[int, int, int],
+    valid_neighbor: Tuple[int, int, int],
+    ratio: float = 0.73
+) -> Tuple[int, int, int]:
+    """
+    Blend an invalid color toward a valid neighbor.
+
+    Args:
+        invalid_color: RGB of the invalid (gray) color
+        valid_neighbor: RGB of the valid chromatic neighbor
+        ratio: How much of invalid to keep (0.73 = 73% invalid, 27% valid)
+
+    Returns:
+        Blended RGB tuple
+    """
+    r = int(invalid_color[0] * ratio + valid_neighbor[0] * (1 - ratio))
+    g = int(invalid_color[1] * ratio + valid_neighbor[1] * (1 - ratio))
+    b = int(invalid_color[2] * ratio + valid_neighbor[2] * (1 - ratio))
+    return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+
+def _find_valid_replacement(
+    invalid_rgb: Tuple[int, int, int],
+    all_colors: List[ColorInfo],
+    max_iterations: int = 20
+) -> Optional[Tuple[int, int, int]]:
+    """
+    Find a valid (non-gray) replacement for an invalid color by blending.
+
+    Iteratively blends the invalid color toward a valid neighbor until
+    the result is no longer named as gray/white/black.
+
+    Args:
+        invalid_rgb: The invalid color RGB
+        all_colors: List of all available colors to find a neighbor
+        max_iterations: Maximum blend iterations
+
+    Returns:
+        Valid RGB tuple or None if no valid replacement found
+    """
+    # Find the most saturated valid neighbor
+    valid_neighbors = [
+        c for c in all_colors
+        if not _is_invalid_color_by_name(c.name)
+        and _get_color_saturation(*c.rgb) > 25
+    ]
+
+    if not valid_neighbors:
+        return None
+
+    # Sort by saturation to get the most vibrant neighbor
+    valid_neighbors.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+    neighbor = valid_neighbors[0]
+
+    current_rgb = invalid_rgb
+    for _ in range(max_iterations):
+        # Blend toward valid neighbor
+        current_rgb = _blend_toward_valid_color(current_rgb, neighbor.rgb, ratio=0.73)
+
+        # Check if now valid
+        name = rgb_to_name(*current_rgb)
+        if not _is_invalid_color_by_name(name):
+            return current_rgb
+
+    return None
+
+
+def _check_family_diversity(colors: List[ColorInfo]) -> bool:
+    """
+    Check if colors have good family diversity.
+
+    Returns False if >50% of colors share the same color family.
     """
     if len(colors) < 3:
         return True  # Too few colors to judge
 
-    hue_counts = {}
+    family_counts = {}
     for c in colors:
-        cat = _get_hue_category(c.rgb)
-        hue_counts[cat] = hue_counts.get(cat, 0) + 1
+        fam = _get_color_family(c.rgb)
+        family_counts[fam] = family_counts.get(fam, 0) + 1
 
-    max_count = max(hue_counts.values())
-    return max_count <= len(colors) * 0.5  # No category should have >50%
+    max_count = max(family_counts.values())
+    return max_count <= len(colors) * 0.5  # No family should have >50%
 
 
-def _find_most_vibrant_by_hue(
+def _find_most_vibrant_by_family(
     colors: List[ColorInfo],
-    num_hues: int = 6
-) -> List[ColorInfo]:
+) -> Dict[str, ColorInfo]:
     """
-    Find the most vibrant color from each major hue category.
+    Find the most vibrant color from each of the 7 color families.
 
-    This ensures diverse hue representation in the final palette.
+    Families: rot, orange, gelb, grün, blau, violett, braun
+    This ensures diverse color representation in the final palette.
+
+    Returns:
+        Dict mapping family name to most vibrant ColorInfo from that family.
     """
-    hue_categories = {}
+    family_colors: Dict[str, ColorInfo] = {}
 
     for c in colors:
-        cat = _get_hue_category(c.rgb)
-        if cat == "gray":
+        family = _get_color_family(c.rgb)
+        if family == "gray":
             continue  # Skip grays
 
         sat = _get_color_saturation(*c.rgb)
-        if cat not in hue_categories or sat > _get_color_saturation(*hue_categories[cat].rgb):
-            hue_categories[cat] = c
 
-    # Sort by saturation and return most vibrant from each hue
-    result = list(hue_categories.values())
-    result.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-    return result[:num_hues]
+        # Keep most vibrant per family
+        if family not in family_colors:
+            family_colors[family] = c
+        elif sat > _get_color_saturation(*family_colors[family].rgb):
+            family_colors[family] = c
+
+    return family_colors
+
+
+def _get_family_anchors(colors: List[ColorInfo]) -> List[ColorInfo]:
+    """
+    Get one representative (most vibrant) color from each present color family.
+
+    Returns list sorted by saturation (most vibrant first).
+    """
+    family_map = _find_most_vibrant_by_family(colors)
+    anchors = list(family_map.values())
+    anchors.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+    return anchors
 
 
 def _get_color_saturation(r: int, g: int, b: int) -> float:
@@ -297,11 +404,10 @@ def _select_diverse_colors(
     min_saturation: float = 25.0,
 ) -> List[ColorInfo]:
     """
-    Select a diverse subset of colors maximizing contrast.
+    Select a diverse subset of colors maximizing contrast across families.
 
-    Uses a greedy algorithm to pick colors that are maximally
-    distant from already selected colors in HSL space.
-    Strongly prefers saturated colors to preserve vibrancy.
+    ALWAYS starts with family anchors (one per family present) to guarantee
+    broad hue diversity. Then fills remaining slots with the most distant colors.
 
     Args:
         colors: List of candidate colors.
@@ -314,25 +420,24 @@ def _select_diverse_colors(
     if len(colors) <= target_count:
         return colors
 
-    # Separate into chromatic and achromatic, with stricter filtering
+    # Separate valid chromatic colors from invalid ones
     chromatic = []
     low_saturation = []
-    achromatic = []
+    invalid = []
 
     for c in colors:
         h, s, l = _get_hsl(c.rgb)
-        # Filter by saturation AND by name - NO grays in the palette!
-        if _is_gray_color_name(c.name):
-            achromatic.append(c)
+        # Filter by name - NO grays in the palette!
+        if _is_invalid_color_by_name(c.name):
+            invalid.append(c)
         elif s >= min_saturation:
             chromatic.append(c)
         elif s >= 15.0:  # Slightly desaturated but still colorful
             low_saturation.append(c)
         else:
-            achromatic.append(c)
+            invalid.append(c)
 
     if not chromatic:
-        # No highly saturated colors, use low saturation ones
         chromatic = low_saturation
         low_saturation = []
 
@@ -341,13 +446,18 @@ def _select_diverse_colors(
         all_sorted = sorted(colors, key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
         return all_sorted[:target_count]
 
-    # Greedy selection: start with most saturated color for maximum vibrancy
-    chromatic.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-    selected = [chromatic[0]]
-    remaining = chromatic[1:]
+    # STEP 1: Start with family anchors (one most vibrant per family)
+    # This GUARANTEES broad hue diversity
+    family_anchors = _get_family_anchors(chromatic)
+    selected = family_anchors[:target_count]
+
+    if len(selected) >= target_count:
+        return selected
+
+    # STEP 2: Fill remaining with most distant colors (greedy)
+    remaining = [c for c in chromatic if c not in selected]
 
     while len(selected) < target_count and remaining:
-        # Find color most distant from all selected colors
         best_color = None
         best_score = -1
 
@@ -357,7 +467,7 @@ def _select_diverse_colors(
                 _color_distance_hsl(candidate.rgb, sel.rgb)
                 for sel in selected
             )
-            # Bonus for saturation to prefer vibrant colors
+            # Bonus for saturation
             sat_bonus = _get_color_saturation(*candidate.rgb) / 200.0
             score = min_dist + sat_bonus
 
@@ -371,14 +481,10 @@ def _select_diverse_colors(
         else:
             break
 
-    # If still not enough, add low saturation colors
+    # STEP 3: If still not enough, add low saturation colors
     while len(selected) < target_count and low_saturation:
         low_saturation.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
         selected.append(low_saturation.pop(0))
-
-    # Last resort: add achromatic (but this should rarely happen)
-    while len(selected) < target_count and achromatic:
-        selected.append(achromatic.pop(0))
 
     return selected
 
@@ -481,7 +587,7 @@ class PaletteExtractor:
         # Create ColorInfo list, filtering out pure black/white/gray
         # These are covered by the shades layer and shouldn't be in color palette
         all_colors = []
-        chromatic_colors = []  # Colors with good saturation
+        chromatic_colors = []  # Colors with good saturation and valid names
 
         for i, color in enumerate(all_cluster_colors):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
@@ -494,20 +600,24 @@ class PaletteExtractor:
             color_info = ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1)
             all_colors.append(color_info)
 
-            # Track chromatic colors (good saturation, not gray-named)
-            if not _is_low_saturation(r, g, b, threshold=25.0) and not _is_gray_color_name(color_info.name):
+            # Track chromatic colors (good saturation, valid name - NOT gray/white/black)
+            if not _is_low_saturation(r, g, b, threshold=20.0) and not _is_invalid_color_by_name(color_info.name):
                 chromatic_colors.append(color_info)
 
-        # Select colors based on method
+        # =====================================================================
+        # ALL METHODS: Use 7-family approach for maximum color diversity
+        # Families: rot, orange, gelb, grün, blau, violett, braun
+        # =====================================================================
+
+        # Step 1: Get family anchors (one most vibrant per family present)
+        family_anchors = _get_family_anchors(chromatic_colors)
+
+        # Step 2: Select colors based on method
         if self.settings.palette_method == PaletteMethod.INTENSIFY:
-            # INTENSIFY: Guarantee vibrant colors from each major hue category
-            # Step 1: Find most vibrant color from each hue
-            hue_anchors = _find_most_vibrant_by_hue(chromatic_colors)
+            # INTENSIFY: Start with family anchors, fill with most VIBRANT
+            colors = family_anchors[: self.settings.num_colors]
 
-            # Step 2: Start with hue anchors (up to num_colors)
-            colors = hue_anchors[: self.settings.num_colors]
-
-            # Step 3: Fill remaining slots with diverse colors not too close to anchors
+            # Fill remaining with most vibrant (by saturation), max 2 per family
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in chromatic_colors if c not in colors]
                 remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
@@ -515,83 +625,88 @@ class PaletteExtractor:
                 for candidate in remaining:
                     if len(colors) >= self.settings.num_colors:
                         break
-                    # Check if this color's hue is already well-represented
-                    candidate_hue = _get_hue_category(candidate.rgb)
-                    hue_count = sum(1 for c in colors if _get_hue_category(c.rgb) == candidate_hue)
-                    # Allow max 2 colors per hue category
-                    if hue_count < 2:
+                    candidate_family = _get_color_family(candidate.rgb)
+                    family_count = sum(1 for c in colors if _get_color_family(c.rgb) == candidate_family)
+                    if family_count < 2:
                         colors.append(candidate)
 
-            # Step 4: If still not enough, add any remaining chromatic (ignore hue limit)
+            # Fill any remaining (ignore family limit)
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in chromatic_colors if c not in colors]
                 remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
-            # Step 5: FINAL FALLBACK - use ALL colors sorted by saturation
-            # This ensures we always fill all requested slots
-            if len(colors) < self.settings.num_colors:
-                remaining = [c for c in all_colors if c not in colors]
-                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                colors.extend(remaining[: self.settings.num_colors - len(colors)])
-
         elif self.settings.palette_method == PaletteMethod.DIVERSE:
-            # Maximize color diversity - pick most distinct colors
+            # DIVERSE: Start with family anchors, fill with most DISTANT colors
             colors = _select_diverse_colors(
-                all_colors,
+                chromatic_colors if chromatic_colors else all_colors,
                 self.settings.num_colors,
-                min_saturation=25.0,
+                min_saturation=20.0,
             )
 
-            # Check hue diversity - if >50% same hue, recalculate with INTENSIFY logic
-            if not _check_hue_diversity(colors):
-                # Recalculate: use hue anchors first
-                hue_anchors = _find_most_vibrant_by_hue(chromatic_colors)
-                colors = hue_anchors[: self.settings.num_colors]
-
-                # Fill with diverse selection
+            # Verify family diversity
+            if not _check_family_diversity(colors):
+                # Recalculate with forced family anchors
+                colors = family_anchors[: self.settings.num_colors]
                 if len(colors) < self.settings.num_colors:
                     remaining = [c for c in chromatic_colors if c not in colors]
                     for candidate in remaining:
                         if len(colors) >= self.settings.num_colors:
                             break
-                        # Add if different hue from existing
-                        candidate_hue = _get_hue_category(candidate.rgb)
-                        existing_hues = [_get_hue_category(c.rgb) for c in colors]
-                        if candidate_hue not in existing_hues or existing_hues.count(candidate_hue) < 2:
+                        candidate_family = _get_color_family(candidate.rgb)
+                        existing_families = [_get_color_family(c.rgb) for c in colors]
+                        if candidate_family not in existing_families or existing_families.count(candidate_family) < 2:
                             colors.append(candidate)
 
         elif self.settings.palette_method == PaletteMethod.SATURATED:
-            # Prioritize MOST saturated colors - preserve original vibrancy!
-            saturated = [c for c in chromatic_colors
-                        if _get_color_saturation(*c.rgb) >= 30.0]
-            saturated.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-            colors = saturated[: self.settings.num_colors]
+            # SATURATED: Start with family anchors, fill with most SATURATED
+            colors = family_anchors[: self.settings.num_colors]
 
-            # Fill with remaining chromatic if not enough
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in chromatic_colors if c not in colors]
                 remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
-            # Last resort: fill with any remaining colors
-            if len(colors) < self.settings.num_colors:
-                remaining = [c for c in all_colors if c not in colors]
-                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                colors.extend(remaining[: self.settings.num_colors - len(colors)])
         else:
-            # STANDARD: Original behavior - by percentage, but filter grays
-            standard_colors = [c for c in all_colors
-                             if not _is_gray_color_name(c.name)
-                             and not _is_low_saturation(*c.rgb, threshold=20.0)]
-            standard_colors.sort(key=lambda c: c.percentage, reverse=True)
-            colors = standard_colors[: self.settings.num_colors]
+            # STANDARD: Start with family anchors, fill by AREA (percentage)
+            colors = family_anchors[: self.settings.num_colors]
 
-            # Fill with remaining if not enough
             if len(colors) < self.settings.num_colors:
-                remaining = [c for c in all_colors if c not in colors]
+                remaining = [c for c in chromatic_colors if c not in colors]
                 remaining.sort(key=lambda c: c.percentage, reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+        # =====================================================================
+        # FINAL FALLBACK: Ensure all slots filled
+        # =====================================================================
+        if len(colors) < self.settings.num_colors:
+            remaining = [c for c in all_colors if c not in colors]
+            remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+            colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+        # =====================================================================
+        # GRAY AVOIDANCE: Replace any remaining gray-named colors
+        # Blend invalid colors toward valid neighbors until valid
+        # =====================================================================
+        final_colors = []
+        for color_info in colors:
+            if _is_invalid_color_by_name(color_info.name):
+                # Try to find a valid replacement by blending
+                valid_rgb = _find_valid_replacement(color_info.rgb, chromatic_colors)
+                if valid_rgb:
+                    # Create new ColorInfo with blended color
+                    new_info = ColorInfo.from_rgb(
+                        valid_rgb[0], valid_rgb[1], valid_rgb[2],
+                        color_info.percentage, color_info.index
+                    )
+                    final_colors.append(new_info)
+                else:
+                    # No valid replacement found, keep original (should be rare)
+                    final_colors.append(color_info)
+            else:
+                final_colors.append(color_info)
+
+        colors = final_colors
 
         # Store colors for posterization
         self._colors = all_cluster_colors
