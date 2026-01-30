@@ -25,7 +25,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSettings
 from PyQt6.QtGui import QImage, QPixmap
 
 from processing.abstraction import AbstractionMethod
-from processing.palette import SortMethod
+from processing.palette import SortMethod, PaletteMethod
 
 
 class OutlineSource(Enum):
@@ -298,6 +298,21 @@ class SettingsPanel(QWidget):
         sort_group = QGroupBox("Paletten-Optionen")
         sort_layout = QVBoxLayout(sort_group)
 
+        # Palette extraction method
+        extract_row = QHBoxLayout()
+        extract_row.addWidget(QLabel("Methode:"))
+        self._palette_method_combo = QComboBox()
+        self._palette_method_combo.addItem("Divers (empfohlen)", PaletteMethod.DIVERSE)
+        self._palette_method_combo.addItem("Gesättigt", PaletteMethod.SATURATED)
+        self._palette_method_combo.addItem("Standard", PaletteMethod.STANDARD)
+        self._palette_method_combo.setToolTip(
+            "Divers: Maximiert Farbkontraste, beste Abdeckung\n"
+            "Gesättigt: Bevorzugt kräftige Farben\n"
+            "Standard: Nach Häufigkeit (K-Means Original)"
+        )
+        extract_row.addWidget(self._palette_method_combo)
+        sort_layout.addLayout(extract_row)
+
         # Sort method
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Sortierung:"))
@@ -384,6 +399,7 @@ class SettingsPanel(QWidget):
 
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
 
+        self._palette_method_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
         self._sort_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
         self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._outline_source_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
@@ -428,6 +444,10 @@ class SettingsPanel(QWidget):
     def get_edge_sensitivity(self) -> float:
         """Get edge sensitivity (0.0 to 1.0)."""
         return self._edge_slider.value() / 100.0
+
+    def get_palette_method(self) -> PaletteMethod:
+        """Get the selected palette extraction method."""
+        return self._palette_method_combo.currentData()
 
     def get_sort_method(self) -> SortMethod:
         """Get the selected palette sort method."""
@@ -480,6 +500,10 @@ class SettingsPanel(QWidget):
         self._steps_spinbox.setValue(settings.value("steps", 9, type=int))
         self._edge_slider.setValue(settings.value("edge_sensitivity", 50, type=int))
 
+        # Load palette method (default: DIVERSE = 0)
+        palette_method_index = settings.value("palette_method", 0, type=int)
+        self._palette_method_combo.setCurrentIndex(palette_method_index)
+
         # Load sort method
         sort_index = settings.value("sort_method", 0, type=int)
         self._sort_combo.setCurrentIndex(sort_index)
@@ -512,6 +536,7 @@ class SettingsPanel(QWidget):
         settings.setValue("values", self._values_spinbox.value())
         settings.setValue("steps", self._steps_spinbox.value())
         settings.setValue("edge_sensitivity", self._edge_slider.value())
+        settings.setValue("palette_method", self._palette_method_combo.currentIndex())
         settings.setValue("sort_method", self._sort_combo.currentIndex())
         settings.setValue("add_numbers", self._add_numbers_checkbox.isChecked())
         settings.setValue("outline_source", self._outline_source_combo.currentIndex())

@@ -28,7 +28,7 @@ from gui.widgets import (
 )
 from processing.outlines import OutlineExtractor
 from processing.shades import ShadeQuantizer
-from processing.palette import PaletteExtractor, PaletteSettings, SortMethod
+from processing.palette import PaletteExtractor, PaletteSettings, SortMethod, PaletteMethod
 from processing.abstraction import ImageAbstractor, AbstractionSettings
 from utils.image_io import ImageIO
 
@@ -40,6 +40,7 @@ class ProcessingOptions:
     num_values: int = 5
     num_colors: int = 9
     edge_sensitivity: float = 0.5
+    palette_method: PaletteMethod = PaletteMethod.DIVERSE
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"
     add_numbers: bool = True
@@ -80,6 +81,7 @@ class ProcessingWorker(QThread):
                 num_colors=opts.num_colors,
                 sort_method=opts.sort_method,
                 grays_position=opts.grays_position,
+                palette_method=opts.palette_method,
             )
             palette_extractor = PaletteExtractor(palette_settings)
             results["colors"] = palette_extractor.extract_palette(working_image)
@@ -144,6 +146,21 @@ class ProcessingWorker(QThread):
                 show_name=True,
                 show_number=opts.add_numbers,
                 grayscales=results["grayscale_levels"],
+            )
+
+            # Create composite overlay: Shades (100%) + Colors (50%)
+            self.progress.emit("Erstelle Überlagerung...")
+            shades_no_numbers = shade_quantizer.quantize(working_image, add_numbers=False)
+            colors_no_numbers = palette_extractor.create_posterized_image(
+                working_image, add_numbers=False
+            )
+            # Blend: shades as base, colors at 50% opacity on top
+            # Both are BGR, so we can blend directly
+            import cv2
+            results["composite"] = cv2.addWeighted(
+                shades_no_numbers, 0.5,  # Base layer at 50%
+                colors_no_numbers, 0.5,  # Top layer at 50%
+                0  # No additional brightness
             )
 
             self.finished.emit(results)
@@ -361,6 +378,7 @@ class MainWindow(QMainWindow):
             num_values=self._settings_panel.get_values(),
             num_colors=self._settings_panel.get_steps(),
             edge_sensitivity=self._settings_panel.get_edge_sensitivity(),
+            palette_method=self._settings_panel.get_palette_method(),
             sort_method=self._settings_panel.get_sort_method(),
             grays_position=self._settings_panel.get_grays_position(),
             add_numbers=self._settings_panel.should_add_numbers(),
@@ -541,6 +559,10 @@ class MainWindow(QMainWindow):
         # Add abstracted image if available (stored in BGR format like source)
         if self._abstracted_image is not None:
             result_map.insert(0, ("abstracted", self._abstracted_image, False))
+
+        # Add composite overlay (shades + colors blend)
+        if self._results.get("composite") is not None:
+            result_map.append(("composite", self._results["composite"], False))
 
         for name, image, is_rgb in result_map:
             if image is not None:

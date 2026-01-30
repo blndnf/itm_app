@@ -21,16 +21,24 @@ class SortMethod(Enum):
     SATURATION = "saturation"  # By saturation
 
 
+class PaletteMethod(Enum):
+    """Palette extraction methods."""
+    STANDARD = "standard"  # K-Means by frequency
+    DIVERSE = "diverse"  # Maximize color diversity/contrast
+    SATURATED = "saturated"  # Prioritize most saturated colors
+
+
 @dataclass
 class PaletteSettings:
     """Settings for palette extraction."""
 
-    num_colors: int = 9  # Must be multiple of 3 (6, 9, 12, 15)
+    num_colors: int = 9  # Must be multiple of 3 (3, 6, 9, 12, 15)
     max_iterations: int = 200
     random_state: int = 42
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
+    palette_method: PaletteMethod = PaletteMethod.DIVERSE  # Extraction method
 
 
 @dataclass
@@ -159,6 +167,130 @@ def _is_pure_black_white_gray(r: int, g: int, b: int, tolerance: int = 5) -> boo
     return True
 
 
+def _is_gray_color_name(name: str) -> bool:
+    """Check if a color name indicates a gray/black/white color."""
+    gray_terms = [
+        "schwarz", "grau", "weiß", "weiss", "anthrazit",
+        "black", "gray", "grey", "white", "charcoal",
+        "silver", "silber", "ash", "slate", "graphit"
+    ]
+    name_lower = name.lower()
+    return any(term in name_lower for term in gray_terms)
+
+
+def _get_color_saturation(r: int, g: int, b: int) -> float:
+    """Get saturation value (0-100) for an RGB color."""
+    _, s, _ = _get_hsl((r, g, b))
+    return s
+
+
+def _color_distance_hsl(c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> float:
+    """
+    Calculate perceptual color distance in HSL space.
+    Weights hue differences more heavily for saturated colors.
+    """
+    h1, s1, l1 = _get_hsl(c1)
+    h2, s2, l2 = _get_hsl(c2)
+
+    # Hue distance (circular, 0-180 max)
+    hue_diff = min(abs(h1 - h2), 360 - abs(h1 - h2))
+    hue_diff = hue_diff / 180.0  # Normalize to 0-1
+
+    # Weight hue by average saturation (more important for saturated colors)
+    avg_sat = (s1 + s2) / 200.0  # 0-1
+    hue_weight = 2.0 * avg_sat
+
+    # Saturation and lightness differences
+    sat_diff = abs(s1 - s2) / 100.0
+    light_diff = abs(l1 - l2) / 100.0
+
+    # Combined distance
+    return (hue_weight * hue_diff) + (0.5 * sat_diff) + (0.3 * light_diff)
+
+
+def _select_diverse_colors(
+    colors: List[ColorInfo],
+    target_count: int,
+    min_saturation: float = 15.0,
+) -> List[ColorInfo]:
+    """
+    Select a diverse subset of colors maximizing contrast.
+
+    Uses a greedy algorithm to pick colors that are maximally
+    distant from already selected colors in HSL space.
+
+    Args:
+        colors: List of candidate colors.
+        target_count: Number of colors to select.
+        min_saturation: Minimum saturation for chromatic colors.
+
+    Returns:
+        List of selected diverse colors.
+    """
+    if len(colors) <= target_count:
+        return colors
+
+    # Separate into chromatic and achromatic
+    chromatic = []
+    achromatic = []
+
+    for c in colors:
+        h, s, l = _get_hsl(c.rgb)
+        # Filter by saturation AND by name
+        if s >= min_saturation and not _is_gray_color_name(c.name):
+            chromatic.append(c)
+        else:
+            achromatic.append(c)
+
+    # If not enough chromatic colors, relax constraints
+    if len(chromatic) < target_count:
+        # Add less saturated but still colored ones
+        for c in colors:
+            if c not in chromatic and c not in achromatic:
+                chromatic.append(c)
+            if len(chromatic) >= target_count:
+                break
+
+    if not chromatic:
+        # Fallback: use all colors sorted by saturation
+        return sorted(colors, key=lambda c: _get_color_saturation(*c.rgb), reverse=True)[:target_count]
+
+    # Greedy selection: start with most saturated color
+    chromatic.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+    selected = [chromatic[0]]
+    remaining = chromatic[1:]
+
+    while len(selected) < target_count and remaining:
+        # Find color most distant from all selected colors
+        best_color = None
+        best_min_dist = -1
+
+        for candidate in remaining:
+            # Minimum distance to any selected color
+            min_dist = min(
+                _color_distance_hsl(candidate.rgb, sel.rgb)
+                for sel in selected
+            )
+            if min_dist > best_min_dist:
+                best_min_dist = min_dist
+                best_color = candidate
+
+        if best_color:
+            selected.append(best_color)
+            remaining.remove(best_color)
+        else:
+            break
+
+    # If still not enough, add remaining chromatic or achromatic
+    while len(selected) < target_count and remaining:
+        selected.append(remaining.pop(0))
+
+    while len(selected) < target_count and achromatic:
+        selected.append(achromatic.pop(0))
+
+    return selected
+
+
 class PaletteExtractor:
     """
     Extracts color palettes from images using K-Means clustering.
@@ -194,8 +326,12 @@ class PaletteExtractor:
         """
         Extract dominant colors from an image.
 
-        Filters out pure black (0,0,0), pure white (255,255,255),
-        and pure grays as these are covered by shades.
+        Uses the configured palette_method to determine extraction strategy:
+        - STANDARD: K-Means by frequency (original behavior)
+        - DIVERSE: Maximize color diversity/contrast (recommended)
+        - SATURATED: Prioritize most saturated colors
+
+        Filters out pure black/white/gray and colors with gray names.
 
         Args:
             image: Input image in BGR format.
@@ -220,11 +356,16 @@ class PaletteExtractor:
         else:
             sample_pixels = pixels
 
-        # Request extra colors to compensate for filtered ones
-        extra_clusters = min(6, self.settings.num_colors)
-        total_clusters = self.settings.num_colors + extra_clusters
+        # For diverse/saturated methods, extract many more clusters to find variety
+        if self.settings.palette_method in (PaletteMethod.DIVERSE, PaletteMethod.SATURATED):
+            # Extract 3-4x more colors to have good candidates for diversity selection
+            total_clusters = min(48, max(24, self.settings.num_colors * 4))
+        else:
+            # Standard method: just a few extra
+            extra_clusters = min(6, self.settings.num_colors)
+            total_clusters = self.settings.num_colors + extra_clusters
 
-        # Perform K-Means clustering with extra clusters
+        # Perform K-Means clustering
         self._kmeans = KMeans(
             n_clusters=total_clusters,
             max_iter=self.settings.max_iterations,
@@ -246,7 +387,7 @@ class PaletteExtractor:
         percentages = {label: count / total_pixels * 100 for label, count in zip(unique, counts)}
 
         # Create ColorInfo list, filtering out pure black/white/gray
-        colors = []
+        all_colors = []
         for i, color in enumerate(all_cluster_colors):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
             pct = percentages.get(i, 0.0)
@@ -255,11 +396,34 @@ class PaletteExtractor:
             if _is_pure_black_white_gray(r, g, b):
                 continue
 
-            colors.append(ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1))
+            all_colors.append(ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1))
 
-        # Limit to requested number of colors (sorted by percentage first)
-        colors.sort(key=lambda c: c.percentage, reverse=True)
-        colors = colors[: self.settings.num_colors]
+        # Select colors based on method
+        if self.settings.palette_method == PaletteMethod.DIVERSE:
+            # Maximize color diversity - pick most distinct colors
+            colors = _select_diverse_colors(
+                all_colors,
+                self.settings.num_colors,
+                min_saturation=15.0,
+            )
+        elif self.settings.palette_method == PaletteMethod.SATURATED:
+            # Filter out gray-named colors, then sort by saturation
+            chromatic = [c for c in all_colors if not _is_gray_color_name(c.name)]
+            chromatic.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+            colors = chromatic[: self.settings.num_colors]
+            # Fill with remaining if not enough
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in all_colors if c not in colors]
+                colors.extend(remaining[: self.settings.num_colors - len(colors)])
+        else:
+            # STANDARD: Original behavior - by percentage
+            colors = [c for c in all_colors if not _is_gray_color_name(c.name)]
+            colors.sort(key=lambda c: c.percentage, reverse=True)
+            colors = colors[: self.settings.num_colors]
+            # Fill with remaining if not enough
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in all_colors if c not in colors]
+                colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
         # Store colors for posterization
         self._colors = all_cluster_colors
