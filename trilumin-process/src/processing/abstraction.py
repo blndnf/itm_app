@@ -263,3 +263,61 @@ def abstract_image(
     settings = AbstractionSettings(enabled=True, method=method, detail_level=detail_level)
     abstractor = ImageAbstractor(settings)
     return abstractor.abstract(image)
+
+
+def apply_color_boost(image: np.ndarray) -> np.ndarray:
+    """
+    Apply color boost to enhance vibrancy and clarity.
+
+    Simulates: +15% Saturation, +5% Contrast, +5% Clarity,
+    -5% Texture, +3% Dehaze, +1% Exposure
+
+    Args:
+        image: Input image in BGR format.
+
+    Returns:
+        Color-boosted image in BGR format.
+    """
+    # Convert to HSV for saturation adjustment
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # Boost saturation by 15%
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)
+
+    # Slight increase in value (exposure +1%)
+    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.01, 0, 255)
+
+    # Convert back to BGR
+    boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    # Apply contrast boost (+5%)
+    # Using CLAHE for local contrast (simulates clarity)
+    lab = cv2.cvtColor(boosted, cv2.COLOR_BGR2LAB)
+    l_channel = lab[:, :, 0]
+
+    # CLAHE for clarity/local contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+
+    # Blend original L with CLAHE L for subtle effect (5% clarity)
+    l_channel = cv2.addWeighted(l_channel, 0.95, l_enhanced, 0.05, 0)
+    lab[:, :, 0] = l_channel
+
+    boosted = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # Global contrast boost (+5%)
+    alpha = 1.05  # Contrast
+    beta = 0      # Brightness
+    boosted = cv2.convertScaleAbs(boosted, alpha=alpha, beta=beta)
+
+    # Dehaze effect (+3%) - slight gamma correction to lift shadows
+    gamma = 0.97  # Slight lift
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255
+                      for i in np.arange(0, 256)]).astype(np.uint8)
+    boosted = cv2.LUT(boosted, table)
+
+    # Texture reduction (-5%) - very subtle bilateral filter
+    boosted = cv2.bilateralFilter(boosted, 5, 20, 20)
+
+    return boosted

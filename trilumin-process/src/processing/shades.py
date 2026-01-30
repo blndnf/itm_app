@@ -27,7 +27,7 @@ class ShadeQuantizer:
     """
 
     MIN_VALUES = 2
-    MAX_VALUES = 12
+    MAX_VALUES = 9  # Max 9 shades for better palette display
 
     def __init__(self, settings: Optional[ShadeSettings] = None):
         """

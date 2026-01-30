@@ -231,24 +231,24 @@ class SettingsPanel(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        # Values (Grayscale levels) group - min 2, max 12
+        # Values (Grayscale levels) group - min 2, max 9
         values_group = QGroupBox("Graustufen (Values)")
         values_layout = QHBoxLayout(values_group)
 
         self._values_slider = QSlider(Qt.Orientation.Horizontal)
-        self._values_slider.setRange(2, 12)
+        self._values_slider.setRange(2, 9)
         self._values_slider.setValue(5)
         self._values_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._values_slider.setTickInterval(1)
 
         self._values_spinbox = QSpinBox()
-        self._values_spinbox.setRange(2, 12)
+        self._values_spinbox.setRange(2, 9)
         self._values_spinbox.setValue(5)
-        self._values_spinbox.setToolTip("Direkte Eingabe möglich (2-12)")
+        self._values_spinbox.setToolTip("Direkte Eingabe möglich (2-9)")
 
         values_layout.addWidget(QLabel("2"))
         values_layout.addWidget(self._values_slider)
-        values_layout.addWidget(QLabel("12"))
+        values_layout.addWidget(QLabel("9"))
         values_layout.addWidget(self._values_spinbox)
 
         layout.addWidget(values_group)
@@ -285,11 +285,13 @@ class SettingsPanel(QWidget):
         extract_row = QHBoxLayout()
         extract_row.addWidget(QLabel("Methode:"))
         self._palette_method_combo = QComboBox()
-        self._palette_method_combo.addItem("Divers (empfohlen)", PaletteMethod.DIVERSE)
+        self._palette_method_combo.addItem("Intensify (empfohlen)", PaletteMethod.INTENSIFY)
+        self._palette_method_combo.addItem("Divers", PaletteMethod.DIVERSE)
         self._palette_method_combo.addItem("Gesättigt", PaletteMethod.SATURATED)
         self._palette_method_combo.addItem("Standard", PaletteMethod.STANDARD)
         self._palette_method_combo.setToolTip(
-            "Divers: Maximiert Farbkontraste, beste Abdeckung\n"
+            "Intensify: Garantiert leuchtende Farben aus jeder Farbfamilie\n"
+            "Divers: Maximiert Farbkontraste, gute Abdeckung\n"
             "Gesättigt: Bevorzugt kräftige Farben\n"
             "Standard: Nach Häufigkeit (K-Means Original)"
         )
@@ -693,6 +695,16 @@ class AbstractionSettingsPanel(QWidget):
         self._enabled_checkbox.setChecked(True)  # Enabled by default
         group_layout.addWidget(self._enabled_checkbox)
 
+        # Color Boost checkbox
+        self._color_boost_checkbox = QCheckBox("Color Boost")
+        self._color_boost_checkbox.setChecked(False)
+        self._color_boost_checkbox.setToolTip(
+            "Erhöht Farbintensität:\n"
+            "+15% Sättigung, +5% Kontrast, +5% Klarheit,\n"
+            "-5% Textur, +3% Dunstentfernung, +1% Belichtung"
+        )
+        group_layout.addWidget(self._color_boost_checkbox)
+
         # Method selection
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Methode:"))
@@ -737,6 +749,7 @@ class AbstractionSettingsPanel(QWidget):
 
     def _connect_signals(self) -> None:
         self._enabled_checkbox.toggled.connect(self._on_enabled_changed)
+        self._color_boost_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._method_combo.currentIndexChanged.connect(
             lambda: self.settings_changed.emit()
         )
@@ -754,6 +767,10 @@ class AbstractionSettingsPanel(QWidget):
     def is_enabled(self) -> bool:
         """Check if abstraction is enabled."""
         return self._enabled_checkbox.isChecked()
+
+    def is_color_boost_enabled(self) -> bool:
+        """Check if color boost is enabled."""
+        return self._color_boost_checkbox.isChecked()
 
     def get_method(self) -> AbstractionMethod:
         """Get the selected abstraction method."""

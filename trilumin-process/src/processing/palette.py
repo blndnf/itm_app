@@ -26,6 +26,7 @@ class PaletteMethod(Enum):
     STANDARD = "standard"  # K-Means by frequency
     DIVERSE = "diverse"  # Maximize color diversity/contrast
     SATURATED = "saturated"  # Prioritize most saturated colors
+    INTENSIFY = "intensify"  # Maximize hue diversity, guarantee vibrant colors from each hue
 
 
 @dataclass
@@ -38,7 +39,7 @@ class PaletteSettings:
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
-    palette_method: PaletteMethod = PaletteMethod.DIVERSE  # Extraction method
+    palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
 
 
 @dataclass
@@ -181,10 +182,83 @@ def _is_gray_color_name(name: str) -> bool:
     gray_terms = [
         "schwarz", "grau", "weiß", "weiss", "anthrazit",
         "black", "gray", "grey", "white", "charcoal",
-        "silver", "silber", "ash", "slate", "graphit"
+        "silver", "silber", "silbergrau", "ash", "slate", "graphit",
+        "dunkelgrau", "hellgrau", "mittelgrau", "warmgrau", "kaltgrau",
+        "schiefergrau", "eisgrau", "stahlgrau", "mausgrau", "aschgrau",
     ]
     name_lower = name.lower()
     return any(term in name_lower for term in gray_terms)
+
+
+def _get_hue_category(rgb: Tuple[int, int, int]) -> str:
+    """Get the hue category name for a color."""
+    h, s, l = _get_hsl(rgb)
+
+    # Low saturation = gray
+    if s < 15:
+        return "gray"
+
+    # Categorize by hue
+    if h < 15 or h >= 345:
+        return "rot"
+    elif h < 45:
+        return "orange"
+    elif h < 75:
+        return "gelb"
+    elif h < 150:
+        return "grün"
+    elif h < 210:
+        return "cyan"
+    elif h < 270:
+        return "blau"
+    elif h < 310:
+        return "violett"
+    else:
+        return "magenta"
+
+
+def _check_hue_diversity(colors: List[ColorInfo]) -> bool:
+    """
+    Check if colors have good hue diversity.
+
+    Returns False if >50% of colors share the same hue category.
+    """
+    if len(colors) < 3:
+        return True  # Too few colors to judge
+
+    hue_counts = {}
+    for c in colors:
+        cat = _get_hue_category(c.rgb)
+        hue_counts[cat] = hue_counts.get(cat, 0) + 1
+
+    max_count = max(hue_counts.values())
+    return max_count <= len(colors) * 0.5  # No category should have >50%
+
+
+def _find_most_vibrant_by_hue(
+    colors: List[ColorInfo],
+    num_hues: int = 6
+) -> List[ColorInfo]:
+    """
+    Find the most vibrant color from each major hue category.
+
+    This ensures diverse hue representation in the final palette.
+    """
+    hue_categories = {}
+
+    for c in colors:
+        cat = _get_hue_category(c.rgb)
+        if cat == "gray":
+            continue  # Skip grays
+
+        sat = _get_color_saturation(*c.rgb)
+        if cat not in hue_categories or sat > _get_color_saturation(*hue_categories[cat].rgb):
+            hue_categories[cat] = c
+
+    # Sort by saturation and return most vibrant from each hue
+    result = list(hue_categories.values())
+    result.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+    return result[:num_hues]
 
 
 def _get_color_saturation(r: int, g: int, b: int) -> float:
@@ -425,17 +499,62 @@ class PaletteExtractor:
                 chromatic_colors.append(color_info)
 
         # Select colors based on method
-        if self.settings.palette_method == PaletteMethod.DIVERSE:
+        if self.settings.palette_method == PaletteMethod.INTENSIFY:
+            # INTENSIFY: Guarantee vibrant colors from each major hue category
+            # Step 1: Find most vibrant color from each hue
+            hue_anchors = _find_most_vibrant_by_hue(chromatic_colors)
+
+            # Step 2: Start with hue anchors (up to num_colors)
+            colors = hue_anchors[: self.settings.num_colors]
+
+            # Step 3: Fill remaining slots with diverse colors not too close to anchors
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in chromatic_colors if c not in colors]
+                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+
+                for candidate in remaining:
+                    if len(colors) >= self.settings.num_colors:
+                        break
+                    # Check if this color's hue is already well-represented
+                    candidate_hue = _get_hue_category(candidate.rgb)
+                    hue_count = sum(1 for c in colors if _get_hue_category(c.rgb) == candidate_hue)
+                    # Allow max 2 colors per hue category
+                    if hue_count < 2:
+                        colors.append(candidate)
+
+            # Step 4: If still not enough, add any remaining chromatic
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in chromatic_colors if c not in colors]
+                colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+        elif self.settings.palette_method == PaletteMethod.DIVERSE:
             # Maximize color diversity - pick most distinct colors
-            # Use chromatic colors first, with increased saturation threshold
             colors = _select_diverse_colors(
                 all_colors,
                 self.settings.num_colors,
-                min_saturation=25.0,  # Increased from 15.0 for better color quality
+                min_saturation=25.0,
             )
+
+            # Check hue diversity - if >50% same hue, recalculate with INTENSIFY logic
+            if not _check_hue_diversity(colors):
+                # Recalculate: use hue anchors first
+                hue_anchors = _find_most_vibrant_by_hue(chromatic_colors)
+                colors = hue_anchors[: self.settings.num_colors]
+
+                # Fill with diverse selection
+                if len(colors) < self.settings.num_colors:
+                    remaining = [c for c in chromatic_colors if c not in colors]
+                    for candidate in remaining:
+                        if len(colors) >= self.settings.num_colors:
+                            break
+                        # Add if different hue from existing
+                        candidate_hue = _get_hue_category(candidate.rgb)
+                        existing_hues = [_get_hue_category(c.rgb) for c in colors]
+                        if candidate_hue not in existing_hues or existing_hues.count(candidate_hue) < 2:
+                            colors.append(candidate)
+
         elif self.settings.palette_method == PaletteMethod.SATURATED:
             # Prioritize MOST saturated colors - preserve original vibrancy!
-            # Filter by saturation value AND name to avoid any grays
             saturated = [c for c in chromatic_colors
                         if _get_color_saturation(*c.rgb) >= 30.0]
             saturated.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
@@ -666,8 +785,8 @@ class PaletteExtractor:
         Create a visual palette image with color swatches.
 
         Layout: A4 landscape format
-        - Upper 3/4: 6 columns x 4 rows = 24 slots for colors
-        - Lower 1/4: 12 columns x 1 row = 12 slots for shades
+        - Upper portion: 6 columns x 4 rows = 24 slots for colors
+        - Lower portion: 9 square tiles for shades (limited to 9 max)
         - Numbers AND names are written INSIDE each tile
         - Unused slots are simply not drawn
 
@@ -679,7 +798,7 @@ class PaletteExtractor:
             cols: Ignored - uses fixed 6 columns for colors.
             show_name: Whether to show color names.
             show_number: Whether to show numbers on swatches.
-            grayscales: Optional list of grayscale values (max 12).
+            grayscales: Optional list of grayscale values (max 9).
             for_export: If True, use white background for printing.
 
         Returns:
@@ -688,17 +807,16 @@ class PaletteExtractor:
         # Fixed A4 landscape grid layout
         COLOR_COLS = 6
         COLOR_ROWS = 4
-        SHADE_COLS = 12
+        MAX_SHADES = 9  # Max 9 shades, square tiles
 
-        # Calculate dimensions for A4 landscape ratio (297mm x 210mm = 1.414:1)
-        # Color tiles take up 3/4 of height, shades take 1/4
+        # Calculate dimensions
         color_tile_size = swatch_size
-        shade_tile_height = swatch_size // 3  # Shades are shorter
+        # Shade tiles are square, sized to fit 9 across the width
+        shade_tile_size = (COLOR_COLS * color_tile_size) // MAX_SHADES
 
         # Image dimensions
         img_width = COLOR_COLS * color_tile_size
-        img_height = COLOR_ROWS * color_tile_size + shade_tile_height
-        shade_tile_width = img_width // SHADE_COLS
+        img_height = COLOR_ROWS * color_tile_size + shade_tile_size
 
         # Background color: gray for display, white for export
         bg_color = (255, 255, 255) if for_export else (50, 50, 50)
@@ -735,19 +853,21 @@ class PaletteExtractor:
                 border_thickness,
             )
 
-        # Draw shade tiles (12x1 grid, bottom portion)
+        # Draw shade tiles (max 9, square tiles, bottom portion)
         if grayscales:
             shade_y = COLOR_ROWS * color_tile_size
+            # Limit to 9 shades max
+            shades_to_draw = grayscales[:MAX_SHADES]
 
-            for i, gray_val in enumerate(grayscales[:12]):  # Max 12 shades
-                gx = i * shade_tile_width
+            for i, gray_val in enumerate(shades_to_draw):
+                gx = i * shade_tile_size
                 gv = int(gray_val)
 
-                # Fill tile
+                # Fill square tile
                 cv2.rectangle(
                     palette_img,
                     (gx + margin, shade_y + margin),
-                    (gx + shade_tile_width - margin, shade_y + shade_tile_height - margin),
+                    (gx + shade_tile_size - margin, shade_y + shade_tile_size - margin),
                     (gv, gv, gv),
                     -1,
                 )
@@ -755,7 +875,7 @@ class PaletteExtractor:
                 cv2.rectangle(
                     palette_img,
                     (gx + margin, shade_y + margin),
-                    (gx + shade_tile_width - margin, shade_y + shade_tile_height - margin),
+                    (gx + shade_tile_size - margin, shade_y + shade_tile_size - margin),
                     (100, 100, 100),
                     border_thickness,
                 )
@@ -767,7 +887,7 @@ class PaletteExtractor:
         # Font sizes relative to tile size
         number_font_size = max(16, color_tile_size // 3)
         name_font_size = max(10, color_tile_size // 6)
-        shade_font_size = max(12, shade_tile_height // 3)
+        shade_font_size = max(12, shade_tile_size // 3)
 
         number_font = self._get_font(number_font_size)
         name_font = self._get_font(name_font_size)
@@ -822,14 +942,15 @@ class PaletteExtractor:
 
                 draw.text((name_x, name_y), name, fill=text_color, font=current_font)
 
-        # Draw Roman numerals on shade tiles
+        # Draw Roman numerals on shade tiles (square tiles, max 9)
         if grayscales:
             from utils.color_naming import int_to_roman
 
             shade_y = COLOR_ROWS * color_tile_size
+            shades_to_draw = grayscales[:MAX_SHADES]
 
-            for i, gray_val in enumerate(grayscales[:12]):
-                gx = i * shade_tile_width
+            for i, gray_val in enumerate(shades_to_draw):
+                gx = i * shade_tile_size
                 gv = int(gray_val)
 
                 tc = get_text_color_for_background((gv, gv, gv))
@@ -840,8 +961,8 @@ class PaletteExtractor:
                 tw = bbox[2] - bbox[0]
                 th = bbox[3] - bbox[1]
 
-                rx = gx + (shade_tile_width - tw) // 2
-                ry = shade_y + (shade_tile_height - th) // 2 - bbox[1] // 2
+                rx = gx + (shade_tile_size - tw) // 2
+                ry = shade_y + (shade_tile_size - th) // 2 - bbox[1] // 2
 
                 draw.text((rx, ry), roman, fill=text_color, font=shade_font)
 

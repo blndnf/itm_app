@@ -29,7 +29,7 @@ from gui.widgets import (
 from processing.outlines import OutlineExtractor
 from processing.shades import ShadeQuantizer
 from processing.palette import PaletteExtractor, PaletteSettings, SortMethod, PaletteMethod
-from processing.abstraction import ImageAbstractor, AbstractionSettings
+from processing.abstraction import ImageAbstractor, AbstractionSettings, apply_color_boost
 from utils.image_io import ImageIO
 
 
@@ -49,6 +49,7 @@ class ProcessingOptions:
     max_curvature: float = 1.0
     min_contrast: int = 0
     abstraction_settings: Optional[AbstractionSettings] = None
+    color_boost: bool = False
 
 
 class ProcessingWorker(QThread):
@@ -68,15 +69,22 @@ class ProcessingWorker(QThread):
             results = {}
             opts = self.options
 
+            # Start with original image
+            working_image = self.image
+
+            # Apply color boost if enabled (before abstraction)
+            if opts.color_boost:
+                self.progress.emit("Wende Color Boost an...")
+                working_image = apply_color_boost(working_image)
+
             # Apply abstraction if enabled
             if opts.abstraction_settings and opts.abstraction_settings.enabled:
                 self.progress.emit("Wende Vorverarbeitung an...")
                 abstractor = ImageAbstractor(opts.abstraction_settings)
-                working_image = abstractor.abstract(self.image)
+                working_image = abstractor.abstract(working_image)
                 results["abstracted"] = working_image
             else:
-                working_image = self.image
-                results["abstracted"] = None
+                results["abstracted"] = working_image if opts.color_boost else None
 
             # Process palette FIRST (needed for outlines from posterized)
             # IMPORTANT: Extract palette from ORIGINAL image to ensure consistent colors
@@ -409,6 +417,7 @@ class MainWindow(QMainWindow):
             max_curvature=self._settings_panel.get_max_curvature(),
             min_contrast=self._settings_panel.get_min_contrast(),
             abstraction_settings=abstraction_settings,
+            color_boost=self._abstraction_panel.is_color_boost_enabled(),
         )
 
     def _process_image(self) -> None:
