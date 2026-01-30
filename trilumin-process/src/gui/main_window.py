@@ -511,17 +511,18 @@ class MainWindow(QMainWindow):
         if not self._results:
             return
 
-        # Use export folder from settings if available
-        start_folder = self._settings_panel.get_export_folder() or ""
-
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Speicherort auswählen",
-            start_folder,
-        )
-
-        if not directory:
-            return
+        # Use export folder from settings - if set and valid, export directly
+        export_folder = self._settings_panel.get_export_folder()
+        if export_folder and os.path.isdir(export_folder):
+            directory = export_folder
+        else:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Speicherort auswählen",
+                export_folder or "",
+            )
+            if not directory:
+                return
 
         base_name = "trilumin"
         if self._current_file_path:

@@ -257,17 +257,17 @@ class SettingsPanel(QWidget):
         steps_layout = QHBoxLayout(steps_group)
 
         self._steps_slider = QSlider(Qt.Orientation.Horizontal)
-        self._steps_slider.setRange(2, 8)  # 6, 9, 12, 15, 18, 21, 24
+        self._steps_slider.setRange(1, 8)  # 3, 6, 9, 12, 15, 18, 21, 24
         self._steps_slider.setValue(3)  # Default 9
         self._steps_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._steps_slider.setTickInterval(1)
 
         self._steps_spinbox = QSpinBox()
-        self._steps_spinbox.setRange(6, 24)
+        self._steps_spinbox.setRange(3, 24)
         self._steps_spinbox.setSingleStep(3)
         self._steps_spinbox.setValue(9)
 
-        steps_layout.addWidget(QLabel("6"))
+        steps_layout.addWidget(QLabel("3"))
         steps_layout.addWidget(self._steps_slider)
         steps_layout.addWidget(QLabel("24"))
         steps_layout.addWidget(self._steps_spinbox)
@@ -402,7 +402,7 @@ class SettingsPanel(QWidget):
     def _on_steps_spinbox_changed(self, value: int) -> None:
         # Round to nearest multiple of 3
         value = round(value / 3) * 3
-        value = max(6, min(24, value))
+        value = max(3, min(24, value))
         self._steps_spinbox.blockSignals(True)
         self._steps_spinbox.setValue(value)
         self._steps_spinbox.blockSignals(False)

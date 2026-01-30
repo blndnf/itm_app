@@ -8,6 +8,7 @@ from typing import Optional, List, Tuple, Dict
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
+from PIL import Image, ImageDraw, ImageFont
 
 from utils.color_naming import rgb_to_name, get_text_color_for_background, is_gray
 
@@ -131,6 +132,33 @@ def sort_palette(
     return sorted_colors
 
 
+def _is_pure_black_white_gray(r: int, g: int, b: int, tolerance: int = 5) -> bool:
+    """
+    Check if a color is pure black, pure white, or pure gray.
+
+    Args:
+        r, g, b: RGB values.
+        tolerance: Maximum deviation allowed for "pure" colors.
+
+    Returns:
+        True if color is pure black, white, or gray.
+    """
+    # Check if all channels are very close (gray/black/white)
+    max_diff = max(abs(r - g), abs(g - b), abs(r - b))
+    if max_diff > tolerance:
+        return False  # Has color, not a pure gray
+
+    # It's a grayscale color - check if pure black or pure white
+    avg = (r + g + b) // 3
+    if avg <= tolerance:  # Pure black
+        return True
+    if avg >= 255 - tolerance:  # Pure white
+        return True
+
+    # It's a gray (covered by shades)
+    return True
+
+
 class PaletteExtractor:
     """
     Extracts color palettes from images using K-Means clustering.
@@ -139,7 +167,7 @@ class PaletteExtractor:
     suitable for oil painting color planning.
     """
 
-    VALID_STEPS = [6, 9, 12, 15, 18, 21, 24]  # Multiples of 3
+    VALID_STEPS = [3, 6, 9, 12, 15, 18, 21, 24]  # Multiples of 3, min 3
 
     def __init__(self, settings: Optional[PaletteSettings] = None):
         """
@@ -158,13 +186,16 @@ class PaletteExtractor:
     def _validate_settings(self) -> None:
         """Ensure settings are within valid range."""
         num_colors = self.settings.num_colors
-        num_colors = max(6, min(24, num_colors))
+        num_colors = max(3, min(24, num_colors))  # Minimum 3 colors
         num_colors = round(num_colors / 3) * 3
         self.settings.num_colors = num_colors
 
     def extract_palette(self, image: np.ndarray) -> List[ColorInfo]:
         """
         Extract dominant colors from an image.
+
+        Filters out pure black (0,0,0), pure white (255,255,255),
+        and pure grays as these are covered by shades.
 
         Args:
             image: Input image in BGR format.
@@ -189,9 +220,13 @@ class PaletteExtractor:
         else:
             sample_pixels = pixels
 
-        # Perform K-Means clustering
+        # Request extra colors to compensate for filtered ones
+        extra_clusters = min(6, self.settings.num_colors)
+        total_clusters = self.settings.num_colors + extra_clusters
+
+        # Perform K-Means clustering with extra clusters
         self._kmeans = KMeans(
-            n_clusters=self.settings.num_colors,
+            n_clusters=total_clusters,
             max_iter=self.settings.max_iterations,
             random_state=self.settings.random_state,
             n_init=10,
@@ -199,7 +234,7 @@ class PaletteExtractor:
         self._kmeans.fit(sample_pixels)
 
         # Get cluster centers (colors)
-        self._colors = self._kmeans.cluster_centers_.astype(np.uint8)
+        all_cluster_colors = self._kmeans.cluster_centers_.astype(np.uint8)
 
         # Predict labels for all pixels to calculate percentages
         all_labels = self._kmeans.predict(pixels)
@@ -210,12 +245,24 @@ class PaletteExtractor:
         total_pixels = len(all_labels)
         percentages = {label: count / total_pixels * 100 for label, count in zip(unique, counts)}
 
-        # Create ColorInfo list
+        # Create ColorInfo list, filtering out pure black/white/gray
         colors = []
-        for i, color in enumerate(self._colors):
+        for i, color in enumerate(all_cluster_colors):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
             pct = percentages.get(i, 0.0)
+
+            # Filter out pure black, white, and grays
+            if _is_pure_black_white_gray(r, g, b):
+                continue
+
             colors.append(ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1))
+
+        # Limit to requested number of colors (sorted by percentage first)
+        colors.sort(key=lambda c: c.percentage, reverse=True)
+        colors = colors[: self.settings.num_colors]
+
+        # Store colors for posterization
+        self._colors = all_cluster_colors
 
         # Sort according to settings
         colors = sort_palette(
@@ -355,6 +402,23 @@ class PaletteExtractor:
 
         return result
 
+    def _get_font(self, size: int) -> ImageFont.FreeTypeFont:
+        """Get a Unicode-supporting font at the given size."""
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ]
+        for path in font_paths:
+            try:
+                return ImageFont.truetype(path, size)
+            except (OSError, IOError):
+                continue
+        return ImageFont.load_default()
+
     def create_palette_image(
         self,
         colors: List[ColorInfo],
@@ -366,6 +430,8 @@ class PaletteExtractor:
     ) -> np.ndarray:
         """
         Create a visual palette image with color swatches.
+
+        Uses PIL for text rendering to support Unicode (Umlauts).
 
         Args:
             colors: List of ColorInfo objects.
@@ -379,27 +445,23 @@ class PaletteExtractor:
             RGB image of the color palette.
         """
         num_colors = len(colors)
-        num_grays = len(grayscales) if grayscales else 0
 
         # Scale factor for fonts/margins (reference: swatch_size=60)
         scale_factor = swatch_size / 60.0
 
-        # Text height: much smaller, just enough for readable text
+        # Text height for layout calculation
         text_height = int(35 * scale_factor) if show_name else 0
         margin = max(2, int(3 * scale_factor))
-        padding = int(8 * scale_factor)  # Padding between swatch and text
+        padding = int(8 * scale_factor)
 
         cell_height = swatch_size + text_height + padding
         cell_width = swatch_size
 
         # Auto-calculate columns for DIN A4 landscape ratio (1.414:1)
         if cols <= 0:
-            # Target aspect ratio: width/height ≈ 1.414 (A4 landscape)
             target_ratio = 1.414
-            # Estimate gray section height
             gray_row_height = (swatch_size // 2 + text_height + int(20 * scale_factor)) if grayscales else 0
 
-            # Find optimal columns
             best_cols = 3
             best_diff = float('inf')
             for test_cols in range(3, min(num_colors + 1, 12)):
@@ -415,7 +477,7 @@ class PaletteExtractor:
 
         rows = (num_colors + cols - 1) // cols
 
-        # Grayscale section: smaller swatches in a single row
+        # Grayscale section
         gray_section_height = 0
         gray_swatch_height = swatch_size // 2
         if grayscales:
@@ -428,17 +490,14 @@ class PaletteExtractor:
 
         border_thickness = max(1, int(scale_factor))
 
-        # Draw color swatches
+        # Draw color swatches using OpenCV
         for i, color_info in enumerate(colors):
             row = i // cols
             col = i % cols
-
             x = col * cell_width
             y = row * cell_height
 
-            # Draw color swatch
             r, g, b = color_info.rgb
-            # Convert to Python int for OpenCV compatibility
             color_tuple = (int(r), int(g), int(b))
             cv2.rectangle(
                 palette_img,
@@ -447,7 +506,6 @@ class PaletteExtractor:
                 color_tuple,
                 -1,
             )
-            # Draw border
             cv2.rectangle(
                 palette_img,
                 (x + margin, y + margin),
@@ -456,70 +514,11 @@ class PaletteExtractor:
                 border_thickness,
             )
 
-            # Draw number on swatch
-            if show_number:
-                tc = get_text_color_for_background((r, g, b))
-                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
-                number_text = str(color_info.index)
-                num_font_scale = 0.6 * scale_factor
-                num_thickness = max(2, int(2 * scale_factor))
-                (tw, th), _ = cv2.getTextSize(
-                    number_text, cv2.FONT_HERSHEY_SIMPLEX, num_font_scale, num_thickness
-                )
-                num_x = x + (swatch_size - tw) // 2
-                num_y = y + (swatch_size + th) // 2
-                cv2.putText(
-                    palette_img,
-                    number_text,
-                    (num_x, num_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    num_font_scale,
-                    text_color,
-                    num_thickness,
-                    cv2.LINE_AA,
-                )
-
-            # Draw name below swatch
-            if show_name:
-                name = color_info.name
-                # Calculate font scale to fit text within swatch width
-                max_text_width = swatch_size - int(10 * scale_factor)
-                name_thickness = max(1, int(1.5 * scale_factor))
-
-                # Start with a reasonable font scale and adjust to fit
-                name_font_scale = 1.5 * scale_factor
-                (tw, th), _ = cv2.getTextSize(
-                    name, cv2.FONT_HERSHEY_SIMPLEX, name_font_scale, name_thickness
-                )
-
-                # Reduce font scale if text is too wide
-                while tw > max_text_width and name_font_scale > 0.3:
-                    name_font_scale *= 0.85
-                    (tw, th), _ = cv2.getTextSize(
-                        name, cv2.FONT_HERSHEY_SIMPLEX, name_font_scale, name_thickness
-                    )
-
-                text_x = x + int(5 * scale_factor)
-                text_y = y + swatch_size + th + int(10 * scale_factor)
-                cv2.putText(
-                    palette_img,
-                    name,
-                    (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    name_font_scale,
-                    (220, 220, 220),
-                    name_thickness,
-                    cv2.LINE_AA,
-                )
-
-        # Draw grayscale section if provided
+        # Draw grayscale swatches if provided
         if grayscales:
-            from utils.color_naming import int_to_roman
-
             separator_y = rows * cell_height + int(8 * scale_factor)
             line_thickness = max(1, int(scale_factor))
             line_margin = int(5 * scale_factor)
-            # Draw separator line
             cv2.line(
                 palette_img,
                 (line_margin, separator_y),
@@ -529,13 +528,12 @@ class PaletteExtractor:
             )
 
             gray_y = separator_y + int(8 * scale_factor)
+            num_grays = len(grayscales)
             gray_swatch_width = (width - 2 * line_margin) // num_grays
 
             for i, gray_val in enumerate(grayscales):
                 gx = line_margin + i * gray_swatch_width
-                gv = int(gray_val)  # Convert to Python int for OpenCV
-
-                # Draw gray swatch (smaller height)
+                gv = int(gray_val)
                 cv2.rectangle(
                     palette_img,
                     (gx + margin, gray_y + margin),
@@ -551,33 +549,98 @@ class PaletteExtractor:
                     border_thickness,
                 )
 
-                # Draw Roman numeral
+        # Convert to PIL Image for text rendering (supports Unicode)
+        pil_image = Image.fromarray(palette_img)
+        draw = ImageDraw.Draw(pil_image)
+
+        # Font sizes based on scale factor
+        number_font_size = max(16, int(24 * scale_factor))
+        name_font_size = max(12, int(18 * scale_factor))
+        gray_font_size = max(12, int(16 * scale_factor))
+
+        number_font = self._get_font(number_font_size)
+        name_font = self._get_font(name_font_size)
+        gray_font = self._get_font(gray_font_size)
+
+        # Draw text on color swatches
+        for i, color_info in enumerate(colors):
+            row = i // cols
+            col = i % cols
+            x = col * cell_width
+            y = row * cell_height
+
+            r, g, b = color_info.rgb
+
+            # Draw number on swatch
+            if show_number:
+                tc = get_text_color_for_background((r, g, b))
+                text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
+                number_text = str(color_info.index)
+
+                bbox = draw.textbbox((0, 0), number_text, font=number_font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+
+                num_x = x + (swatch_size - tw) // 2
+                num_y = y + (swatch_size - th) // 2 - bbox[1]
+
+                draw.text((num_x, num_y), number_text, fill=text_color, font=number_font)
+
+            # Draw name below swatch
+            if show_name:
+                name = color_info.name
+                max_text_width = swatch_size - int(10 * scale_factor)
+
+                current_font = name_font
+                current_size = name_font_size
+
+                bbox = draw.textbbox((0, 0), name, font=current_font)
+                tw = bbox[2] - bbox[0]
+
+                while tw > max_text_width and current_size > 8:
+                    current_size = int(current_size * 0.85)
+                    current_font = self._get_font(current_size)
+                    bbox = draw.textbbox((0, 0), name, font=current_font)
+                    tw = bbox[2] - bbox[0]
+
+                text_x = x + int(5 * scale_factor)
+                text_y = y + swatch_size + int(8 * scale_factor)
+
+                draw.text((text_x, text_y), name, fill=(220, 220, 220), font=current_font)
+
+        # Draw Roman numerals on grayscale swatches
+        if grayscales:
+            from utils.color_naming import int_to_roman
+
+            separator_y = rows * cell_height + int(8 * scale_factor)
+            gray_y = separator_y + int(8 * scale_factor)
+            line_margin = int(5 * scale_factor)
+            num_grays = len(grayscales)
+            gray_swatch_width = (width - 2 * line_margin) // num_grays
+
+            for i, gray_val in enumerate(grayscales):
+                gx = line_margin + i * gray_swatch_width
+                gv = int(gray_val)
+
                 tc = get_text_color_for_background((gv, gv, gv))
                 text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
                 roman = int_to_roman(i + 1)
-                gray_font_scale = 0.4 * scale_factor
-                gray_thickness = max(1, int(scale_factor))
-                (tw, th), _ = cv2.getTextSize(
-                    roman, cv2.FONT_HERSHEY_SIMPLEX, gray_font_scale, gray_thickness
-                )
-                rx = gx + (gray_swatch_width - tw) // 2
-                ry = gray_y + (gray_swatch_height + th) // 2
-                cv2.putText(
-                    palette_img,
-                    roman,
-                    (rx, ry),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    gray_font_scale,
-                    text_color,
-                    gray_thickness,
-                    cv2.LINE_AA,
-                )
 
-        return palette_img
+                bbox = draw.textbbox((0, 0), roman, font=gray_font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+
+                rx = gx + (gray_swatch_width - tw) // 2
+                ry = gray_y + (gray_swatch_height - th) // 2 - bbox[1]
+
+                draw.text((rx, ry), roman, fill=text_color, font=gray_font)
+
+        # Convert back to numpy array
+        return np.array(pil_image)
 
     def set_num_colors(self, num_colors: int) -> None:
         """Set the number of colors to extract."""
-        num_colors = max(6, min(24, num_colors))
+        num_colors = max(3, min(24, num_colors))
         num_colors = round(num_colors / 3) * 3
         self.settings.num_colors = num_colors
         self._kmeans = None
