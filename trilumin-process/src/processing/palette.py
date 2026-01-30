@@ -522,9 +522,17 @@ class PaletteExtractor:
                     if hue_count < 2:
                         colors.append(candidate)
 
-            # Step 4: If still not enough, add any remaining chromatic
+            # Step 4: If still not enough, add any remaining chromatic (ignore hue limit)
             if len(colors) < self.settings.num_colors:
                 remaining = [c for c in chromatic_colors if c not in colors]
+                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
+                colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+            # Step 5: FINAL FALLBACK - use ALL colors sorted by saturation
+            # This ensures we always fill all requested slots
+            if len(colors) < self.settings.num_colors:
+                remaining = [c for c in all_colors if c not in colors]
+                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
         elif self.settings.palette_method == PaletteMethod.DIVERSE:

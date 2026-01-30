@@ -232,6 +232,24 @@ class MainWindow(QMainWindow):
         self._open_button.setMinimumWidth(120)
         toolbar_layout.addWidget(self._open_button)
 
+        # Display mode dropdown (left side)
+        from PyQt6.QtWidgets import QComboBox
+        self._display_combo = QComboBox()
+        self._display_combo.addItem("Zeige: Quelle", "source")
+        self._display_combo.addItem("Zeige: Vorverarbeitet", "abstracted")
+        self._display_combo.addItem("Zeige: Composite", "composite")
+        self._display_combo.setMinimumWidth(160)
+        self._display_combo.setEnabled(False)
+        self._display_combo.setToolTip(
+            "Quelle: Originalbild\n"
+            "Vorverarbeitet: Nach Abstraktion/Color Boost\n"
+            "Composite: Überlagerung von Shades und Colors"
+        )
+        toolbar_layout.addWidget(self._display_combo)
+
+        toolbar_layout.addStretch()
+
+        # Update button (right side)
         self._update_button = QPushButton("Aktualisieren")
         self._update_button.setMinimumWidth(120)
         self._update_button.setEnabled(False)
@@ -239,16 +257,6 @@ class MainWindow(QMainWindow):
             "Wendet geänderte Einstellungen auf das Bild an"
         )
         toolbar_layout.addWidget(self._update_button)
-
-        toolbar_layout.addStretch()
-
-        self._toggle_preview_button = QPushButton("Zeige: Original")
-        self._toggle_preview_button.setMinimumWidth(140)
-        self._toggle_preview_button.setEnabled(False)
-        self._toggle_preview_button.setToolTip(
-            "Wechselt zwischen Original und vorverarbeitetem Bild"
-        )
-        toolbar_layout.addWidget(self._toggle_preview_button)
 
         self._save_all_button = QPushButton("Alle speichern")
         self._save_all_button.setMinimumWidth(120)
@@ -325,7 +333,7 @@ class MainWindow(QMainWindow):
         self._open_button.clicked.connect(self._open_image)
         self._update_button.clicked.connect(self._process_image)
         self._save_all_button.clicked.connect(self._save_all)
-        self._toggle_preview_button.clicked.connect(self._toggle_preview)
+        self._display_combo.currentIndexChanged.connect(self._on_display_changed)
 
         self._outlines_panel.save_requested.connect(self._save_result)
         self._shades_panel.save_requested.connect(self._save_result)
@@ -342,19 +350,23 @@ class MainWindow(QMainWindow):
         if self._results:
             self._update_button.setEnabled(True)
 
-    def _toggle_preview(self) -> None:
-        """Toggle between original and abstracted image preview."""
-        if self._abstracted_image is None:
-            return
+    def _on_display_changed(self, index: int) -> None:
+        """Handle display mode dropdown change."""
+        mode = self._display_combo.currentData()
 
-        self._show_abstracted = not self._show_abstracted
-
-        if self._show_abstracted:
-            self._source_preview.set_image(self._abstracted_image)
-            self._toggle_preview_button.setText("Zeige: Vorverarbeitet")
-        else:
-            self._source_preview.set_image(self._source_image)
-            self._toggle_preview_button.setText("Zeige: Original")
+        if mode == "source":
+            if self._source_image is not None:
+                self._source_preview.set_image(self._source_image)
+        elif mode == "abstracted":
+            if self._abstracted_image is not None:
+                self._source_preview.set_image(self._abstracted_image)
+            elif self._source_image is not None:
+                self._source_preview.set_image(self._source_image)
+        elif mode == "composite":
+            if "composite" in self._results and self._results["composite"] is not None:
+                self._source_preview.set_image(self._results["composite"])
+            elif self._source_image is not None:
+                self._source_preview.set_image(self._source_image)
 
     def _open_image(self) -> None:
         # Use source folder from settings if available
@@ -372,11 +384,10 @@ class MainWindow(QMainWindow):
             if image is not None:
                 self._source_image = image
                 self._abstracted_image = None
-                self._show_abstracted = False
                 self._current_file_path = file_path
                 self._source_preview.set_image(image)
-                self._toggle_preview_button.setEnabled(False)
-                self._toggle_preview_button.setText("Zeige: Original")
+                self._display_combo.setCurrentIndex(0)  # Reset to "Quelle"
+                self._display_combo.setEnabled(False)
                 self._clear_results()
 
                 info = ImageIO.get_image_info(file_path)
@@ -427,7 +438,7 @@ class MainWindow(QMainWindow):
         # Disable UI during processing
         self._update_button.setEnabled(False)
         self._open_button.setEnabled(False)
-        self._toggle_preview_button.setEnabled(False)
+        self._display_combo.setEnabled(False)
         self._progress_bar.setRange(0, 0)
         self._progress_bar.show()
 
@@ -451,15 +462,20 @@ class MainWindow(QMainWindow):
         # Store abstracted image if available
         if results.get("abstracted") is not None:
             self._abstracted_image = results["abstracted"]
-            self._toggle_preview_button.setEnabled(True)
             self._show_abstracted = True
+            # Show abstracted by default, enable dropdown
+            self._display_combo.setCurrentIndex(1)  # "Vorverarbeitet"
             self._source_preview.set_image(self._abstracted_image)
-            self._toggle_preview_button.setText("Zeige: Vorverarbeitet")
         else:
             self._abstracted_image = None
-            self._toggle_preview_button.setEnabled(False)
             self._show_abstracted = False
-            self._toggle_preview_button.setText("Zeige: Original")
+            # Show source, but enable dropdown for composite
+            self._display_combo.setCurrentIndex(0)  # "Quelle"
+            if self._source_image is not None:
+                self._source_preview.set_image(self._source_image)
+
+        # Enable display dropdown (composite is now available)
+        self._display_combo.setEnabled(True)
 
         # Display results
         self._outlines_panel.set_image(results["outlines"])
