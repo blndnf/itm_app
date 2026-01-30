@@ -45,6 +45,9 @@ class ProcessingOptions:
     grays_position: str = "end"
     add_numbers: bool = True
     outline_source: OutlineSource = OutlineSource.POSTERIZED
+    min_contour_length: int = 0
+    max_curvature: float = 1.0
+    min_contrast: int = 0
     abstraction_settings: Optional[AbstractionSettings] = None
 
 
@@ -102,6 +105,9 @@ class ProcessingWorker(QThread):
             self.progress.emit("Extrahiere Konturen...")
             outline_extractor = OutlineExtractor()
             outline_extractor.set_sensitivity(opts.edge_sensitivity)
+            outline_extractor.set_min_contour_length(opts.min_contour_length)
+            outline_extractor.set_max_curvature(opts.max_curvature)
+            outline_extractor.set_min_contrast(opts.min_contrast)
 
             # Get outline source image(s)
             posterized_for_outline = palette_extractor.create_posterized_image(
@@ -154,11 +160,15 @@ class ProcessingWorker(QThread):
             colors_no_numbers = palette_extractor.create_posterized_image(
                 working_image, add_numbers=False
             )
-            # Blend: shades as base, colors at 50% opacity on top
-            # Both are BGR, so we can blend directly
+            # Convert shades to BGR if grayscale
             import cv2
+            if len(shades_no_numbers.shape) == 2:
+                shades_bgr = cv2.cvtColor(shades_no_numbers, cv2.COLOR_GRAY2BGR)
+            else:
+                shades_bgr = shades_no_numbers
+            # Blend: shades as base, colors at 50% opacity on top
             results["composite"] = cv2.addWeighted(
-                shades_no_numbers, 0.5,  # Base layer at 50%
+                shades_bgr, 0.5,  # Base layer at 50%
                 colors_no_numbers, 0.5,  # Top layer at 50%
                 0  # No additional brightness
             )
@@ -383,6 +393,9 @@ class MainWindow(QMainWindow):
             grays_position=self._settings_panel.get_grays_position(),
             add_numbers=self._settings_panel.should_add_numbers(),
             outline_source=self._settings_panel.get_outline_source(),
+            min_contour_length=self._settings_panel.get_min_contour_length(),
+            max_curvature=self._settings_panel.get_max_curvature(),
+            min_contrast=self._settings_panel.get_min_contrast(),
             abstraction_settings=abstraction_settings,
         )
 

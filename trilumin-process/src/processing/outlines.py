@@ -27,6 +27,9 @@ class OutlineSettings:
     clahe_grid_size: int = 8
     line_thickness: int = 2  # Dilation iterations for thicker lines
     background_gray: int = 220  # Light gray background (0-255)
+    min_contour_length: int = 0  # Minimum contour arc length (0 = no filter)
+    max_curvature: float = 1.0  # Max circularity (0-1, 1 = allow all)
+    min_contrast: int = 0  # Additional contrast threshold (0-100)
 
 
 class OutlineExtractor:
@@ -101,12 +104,22 @@ class OutlineExtractor:
             kernel_size += 1  # Must be odd
         blurred = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
 
+        # Apply additional contrast threshold if set
+        if self.settings.min_contrast > 0:
+            # Increase Canny thresholds based on min_contrast
+            contrast_boost = self.settings.min_contrast
+            low_thresh = self.settings.low_threshold + contrast_boost
+            high_thresh = self.settings.high_threshold + contrast_boost * 2
+        else:
+            low_thresh = self.settings.low_threshold
+            high_thresh = self.settings.high_threshold
+
         # Apply Canny edge detection
-        edges = cv2.Canny(
-            blurred,
-            self.settings.low_threshold,
-            self.settings.high_threshold,
-        )
+        edges = cv2.Canny(blurred, low_thresh, high_thresh)
+
+        # Filter contours if length or curvature filters are set
+        if self.settings.min_contour_length > 0 or self.settings.max_curvature < 1.0:
+            edges = self._filter_contours(edges)
 
         # Thicken lines if requested
         if self.settings.line_thickness > 1:
@@ -123,6 +136,49 @@ class OutlineExtractor:
             return result
         else:
             return edges
+
+    def _filter_contours(self, edges: np.ndarray) -> np.ndarray:
+        """
+        Filter contours by minimum length and maximum curvature.
+
+        Args:
+            edges: Binary edge image from Canny.
+
+        Returns:
+            Filtered edge image with small/circular contours removed.
+        """
+        # Find contours
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        # Create output image
+        filtered = np.zeros_like(edges)
+
+        min_len = self.settings.min_contour_length
+        max_curv = self.settings.max_curvature
+
+        for contour in contours:
+            # Calculate arc length
+            arc_length = cv2.arcLength(contour, closed=False)
+
+            # Skip if too short
+            if arc_length < min_len:
+                continue
+
+            # Calculate circularity (4 * pi * area / perimeter^2)
+            # High circularity = circle-like = small squiggles
+            if max_curv < 1.0 and arc_length > 0:
+                area = cv2.contourArea(contour)
+                circularity = (4 * np.pi * area) / (arc_length * arc_length) if arc_length > 0 else 0
+                # Circularity of a circle is 1.0, line is ~0
+                if circularity > max_curv:
+                    continue
+
+            # Draw accepted contour
+            cv2.drawContours(filtered, [contour], -1, 255, 1)
+
+        return filtered
 
     def extract_with_dilation(
         self,
@@ -187,6 +243,21 @@ class OutlineExtractor:
     def set_use_clahe(self, use_clahe: bool) -> None:
         """Enable or disable CLAHE contrast enhancement."""
         self.settings.use_clahe = use_clahe
+
+    def set_min_contour_length(self, length: int) -> None:
+        """Set minimum contour length filter (0 = no filter)."""
+        self.settings.min_contour_length = max(0, length)
+
+    def set_max_curvature(self, curvature: float) -> None:
+        """
+        Set maximum curvature (circularity) filter.
+        0.0 = only straight lines, 1.0 = allow all shapes.
+        """
+        self.settings.max_curvature = max(0.0, min(1.0, curvature))
+
+    def set_min_contrast(self, contrast: int) -> None:
+        """Set minimum contrast threshold (0-100)."""
+        self.settings.min_contrast = max(0, min(100, contrast))
 
 
 def extract_outlines(

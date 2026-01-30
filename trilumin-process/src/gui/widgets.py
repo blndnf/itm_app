@@ -353,6 +353,49 @@ class SettingsPanel(QWidget):
         source_row.addWidget(self._outline_source_combo)
         outline_layout.addLayout(source_row)
 
+        # Minimum contour length slider
+        min_len_row = QHBoxLayout()
+        min_len_row.addWidget(QLabel("Min. Länge:"))
+        self._min_length_slider = QSlider(Qt.Orientation.Horizontal)
+        self._min_length_slider.setRange(0, 200)
+        self._min_length_slider.setValue(0)
+        self._min_length_slider.setToolTip("Minimale Konturlänge (0 = kein Filter)")
+        self._min_length_label = QLabel("0")
+        self._min_length_label.setMinimumWidth(30)
+        min_len_row.addWidget(self._min_length_slider)
+        min_len_row.addWidget(self._min_length_label)
+        outline_layout.addLayout(min_len_row)
+
+        # Maximum curvature slider (filters out small circles/squiggles)
+        max_curv_row = QHBoxLayout()
+        max_curv_row.addWidget(QLabel("Max. Krümmung:"))
+        self._max_curvature_slider = QSlider(Qt.Orientation.Horizontal)
+        self._max_curvature_slider.setRange(0, 100)
+        self._max_curvature_slider.setValue(100)  # 100 = allow all
+        self._max_curvature_slider.setToolTip(
+            "Filtert kreisförmige Konturen (100 = alle erlauben, 0 = nur gerade Linien)"
+        )
+        self._max_curvature_label = QLabel("100%")
+        self._max_curvature_label.setMinimumWidth(40)
+        max_curv_row.addWidget(self._max_curvature_slider)
+        max_curv_row.addWidget(self._max_curvature_label)
+        outline_layout.addLayout(max_curv_row)
+
+        # Minimum contrast slider
+        min_contrast_row = QHBoxLayout()
+        min_contrast_row.addWidget(QLabel("Min. Kontrast:"))
+        self._min_contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        self._min_contrast_slider.setRange(0, 100)
+        self._min_contrast_slider.setValue(0)
+        self._min_contrast_slider.setToolTip(
+            "Erhöht Schwellwert für Kantenerkennung (0 = Standard)"
+        )
+        self._min_contrast_label = QLabel("0")
+        self._min_contrast_label.setMinimumWidth(30)
+        min_contrast_row.addWidget(self._min_contrast_slider)
+        min_contrast_row.addWidget(self._min_contrast_label)
+        outline_layout.addLayout(min_contrast_row)
+
         layout.addWidget(outline_group)
 
         # Folder settings
@@ -404,6 +447,11 @@ class SettingsPanel(QWidget):
         self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._outline_source_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
 
+        # Outline filter sliders
+        self._min_length_slider.valueChanged.connect(self._on_min_length_changed)
+        self._max_curvature_slider.valueChanged.connect(self._on_max_curvature_changed)
+        self._min_contrast_slider.valueChanged.connect(self._on_min_contrast_changed)
+
         # Folder browser buttons
         self._source_folder_btn.clicked.connect(self._browse_source_folder)
         self._export_folder_btn.clicked.connect(self._browse_export_folder)
@@ -431,6 +479,18 @@ class SettingsPanel(QWidget):
 
     def _on_edge_changed(self, value: int) -> None:
         self._edge_label.setText(f"{value}%")
+        self.settings_changed.emit()
+
+    def _on_min_length_changed(self, value: int) -> None:
+        self._min_length_label.setText(str(value))
+        self.settings_changed.emit()
+
+    def _on_max_curvature_changed(self, value: int) -> None:
+        self._max_curvature_label.setText(f"{value}%")
+        self.settings_changed.emit()
+
+    def _on_min_contrast_changed(self, value: int) -> None:
+        self._min_contrast_label.setText(str(value))
         self.settings_changed.emit()
 
     def get_values(self) -> int:
@@ -464,6 +524,18 @@ class SettingsPanel(QWidget):
     def get_outline_source(self) -> OutlineSource:
         """Get the outline extraction source."""
         return self._outline_source_combo.currentData()
+
+    def get_min_contour_length(self) -> int:
+        """Get minimum contour length filter value."""
+        return self._min_length_slider.value()
+
+    def get_max_curvature(self) -> float:
+        """Get maximum curvature filter (0.0-1.0)."""
+        return self._max_curvature_slider.value() / 100.0
+
+    def get_min_contrast(self) -> int:
+        """Get minimum contrast threshold."""
+        return self._min_contrast_slider.value()
 
     def get_source_folder(self) -> str:
         """Get the source folder path."""
@@ -517,6 +589,11 @@ class SettingsPanel(QWidget):
         outline_index = settings.value("outline_source", 1, type=int)
         self._outline_source_combo.setCurrentIndex(outline_index)
 
+        # Load outline filters
+        self._min_length_slider.setValue(settings.value("min_contour_length", 0, type=int))
+        self._max_curvature_slider.setValue(settings.value("max_curvature", 100, type=int))
+        self._min_contrast_slider.setValue(settings.value("min_contrast", 0, type=int))
+
         # Load folders
         self._source_folder_edit.setText(
             settings.value("source_folder", "", type=str)
@@ -540,6 +617,9 @@ class SettingsPanel(QWidget):
         settings.setValue("sort_method", self._sort_combo.currentIndex())
         settings.setValue("add_numbers", self._add_numbers_checkbox.isChecked())
         settings.setValue("outline_source", self._outline_source_combo.currentIndex())
+        settings.setValue("min_contour_length", self._min_length_slider.value())
+        settings.setValue("max_curvature", self._max_curvature_slider.value())
+        settings.setValue("min_contrast", self._min_contrast_slider.value())
         settings.setValue("source_folder", self._source_folder_edit.text())
         settings.setValue("export_folder", self._export_folder_edit.text())
 
@@ -628,7 +708,7 @@ class AbstractionSettingsPanel(QWidget):
 
         # Enable checkbox
         self._enabled_checkbox = QCheckBox("Vorverarbeitung aktivieren")
-        self._enabled_checkbox.setChecked(False)
+        self._enabled_checkbox.setChecked(True)  # Enabled by default
         group_layout.addWidget(self._enabled_checkbox)
 
         # Method selection
@@ -640,7 +720,7 @@ class AbstractionSettingsPanel(QWidget):
         self._method_combo.addItem("Pixelierung", AbstractionMethod.PIXELATE)
         self._method_combo.addItem("Mean Shift", AbstractionMethod.MEAN_SHIFT)
         self._method_combo.addItem("K-Means Farben", AbstractionMethod.KMEANS)
-        self._method_combo.setEnabled(False)
+        self._method_combo.setEnabled(True)  # Enabled by default
 
         method_layout.addWidget(self._method_combo)
         group_layout.addLayout(method_layout)
@@ -654,7 +734,7 @@ class AbstractionSettingsPanel(QWidget):
         self._detail_slider.setValue(5)
         self._detail_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._detail_slider.setTickInterval(1)
-        self._detail_slider.setEnabled(False)
+        self._detail_slider.setEnabled(True)  # Enabled by default
 
         self._detail_label = QLabel("5")
         self._detail_label.setMinimumWidth(20)
