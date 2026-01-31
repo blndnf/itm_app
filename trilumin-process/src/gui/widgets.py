@@ -306,6 +306,7 @@ class SettingsPanel(QWidget):
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Sortierung:"))
         self._sort_combo = QComboBox()
+        self._sort_combo.addItem("Farbfamilie (Warm→Kalt)", SortMethod.FAMILY)
         self._sort_combo.addItem("Nach Farbton", SortMethod.HUE)
         self._sort_combo.addItem("Nach Helligkeit", SortMethod.LIGHTNESS)
         self._sort_combo.addItem("Nach Sättigung", SortMethod.SATURATION)

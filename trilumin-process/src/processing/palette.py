@@ -15,7 +15,8 @@ from utils.color_naming import rgb_to_name, get_text_color_for_background, is_gr
 
 class SortMethod(Enum):
     """Palette sorting methods."""
-    PERCENTAGE = "percentage"  # By area percentage (default)
+    FAMILY = "family"  # By color family (warm to cold) - DEFAULT
+    PERCENTAGE = "percentage"  # By area percentage
     HUE = "hue"  # By color hue
     LIGHTNESS = "lightness"  # By lightness
     SATURATION = "saturation"  # By saturation
@@ -38,7 +39,7 @@ class PaletteSettings:
     num_colors: int = 9  # Must be multiple of 3 (3, 6, 9, 12, 15)
     max_iterations: int = 200
     random_state: int = 42
-    sort_method: SortMethod = SortMethod.HUE
+    sort_method: SortMethod = SortMethod.FAMILY  # Default: warm to cold
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
     palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
@@ -85,9 +86,23 @@ def _get_hsl(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
     return h * 360, s * 100, l * 100
 
 
+# Family order for warm-to-cold sorting
+FAMILY_ORDER_WARM_TO_COLD = {
+    "rot": 0,
+    "orange": 1,
+    "gelb": 2,
+    "braun": 3,  # Warm but earthy
+    "grün": 4,   # Neutral
+    "blau": 5,   # Cold
+    "violett": 6,  # Cold
+    "gray": 7,   # Grays at end
+    "extreme": 8,
+}
+
+
 def sort_palette(
     colors: List[ColorInfo],
-    method: SortMethod = SortMethod.HUE,
+    method: SortMethod = SortMethod.FAMILY,
     grays_position: str = "end",
     gray_threshold: float = 12.0,
 ) -> List[ColorInfo]:
@@ -105,6 +120,16 @@ def sort_palette(
     """
     if method == SortMethod.PERCENTAGE:
         sorted_colors = sorted(colors, key=lambda c: c.percentage, reverse=True)
+    elif method == SortMethod.FAMILY:
+        # Sort by color family (warm to cold), then by saturation within family
+        def family_sort_key(color: ColorInfo):
+            family = _get_color_family(color.rgb)
+            family_order = FAMILY_ORDER_WARM_TO_COLD.get(family, 99)
+            _, s, _ = _get_hsl(color.rgb)
+            # Within family: most saturated first
+            return (family_order, -s)
+
+        sorted_colors = sorted(colors, key=family_sort_key)
     else:
         # Separate grays from chromatic colors
         grays = []
@@ -665,6 +690,129 @@ def _get_color_saturation(r: int, g: int, b: int) -> float:
     return s
 
 
+def _generate_color_variation(
+    rgb: Tuple[int, int, int],
+    variation_type: str,
+    strength: float = 0.15,
+) -> Tuple[int, int, int]:
+    """
+    Generate a color variation for filling missing palette slots.
+
+    Args:
+        rgb: Original RGB color.
+        variation_type: Type of variation:
+            - "lighter": Increase lightness
+            - "darker": Decrease lightness
+            - "saturated": Increase saturation
+            - "desaturated": Decrease saturation
+        strength: How much to vary (0.0-1.0).
+
+    Returns:
+        New RGB tuple.
+    """
+    r, g, b = rgb
+    # Convert to HLS (note: colorsys uses HLS, not HSL)
+    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+
+    if variation_type == "lighter":
+        l = min(0.95, l + (1.0 - l) * strength)
+    elif variation_type == "darker":
+        l = max(0.05, l - l * strength)
+    elif variation_type == "saturated":
+        s = min(1.0, s + (1.0 - s) * strength)
+    elif variation_type == "desaturated":
+        s = max(0.0, s - s * strength)
+
+    # Convert back to RGB
+    r_new, g_new, b_new = colorsys.hls_to_rgb(h, l, s)
+    return (
+        max(0, min(255, int(r_new * 255))),
+        max(0, min(255, int(g_new * 255))),
+        max(0, min(255, int(b_new * 255))),
+    )
+
+
+def _fill_missing_colors(
+    colors: List[ColorInfo],
+    target_count: int,
+    method: "PaletteMethod",
+) -> List[ColorInfo]:
+    """
+    Fill missing color slots with method-appropriate variations.
+
+    When fewer colors are found than requested, generate variations
+    of existing colors to fill the remaining slots.
+
+    Args:
+        colors: Current list of colors.
+        target_count: Desired number of colors.
+        method: Palette method (determines variation type).
+
+    Returns:
+        Extended list with generated color variations.
+    """
+    if len(colors) >= target_count:
+        return colors[:target_count]
+
+    result = list(colors)
+    missing = target_count - len(result)
+
+    # Determine variation strategy based on method
+    if method == PaletteMethod.GLOW or method == PaletteMethod.LUMINOUS:
+        variation_types = ["lighter", "lighter", "saturated"]
+    elif method == PaletteMethod.SATURATED or method == PaletteMethod.INTENSIFY:
+        variation_types = ["saturated", "darker", "saturated"]
+    elif method == PaletteMethod.DIVERSE:
+        variation_types = ["lighter", "darker", "saturated"]
+    else:  # STANDARD
+        variation_types = ["lighter", "darker", "desaturated"]
+
+    # Generate variations by cycling through existing colors
+    variation_index = 0
+    color_cycle_index = 0
+    strength = 0.15
+
+    while len(result) < target_count and colors:
+        base_color = colors[color_cycle_index % len(colors)]
+        var_type = variation_types[variation_index % len(variation_types)]
+
+        # Generate variation
+        new_rgb = _generate_color_variation(base_color.rgb, var_type, strength)
+
+        # Check if this color is too similar to existing ones
+        is_unique = True
+        for existing in result:
+            dist = _color_distance_hsl(new_rgb, existing.rgb)
+            if dist < 0.1:  # Too similar
+                is_unique = False
+                break
+
+        if is_unique:
+            # Create new ColorInfo
+            new_color = ColorInfo.from_rgb(
+                new_rgb[0], new_rgb[1], new_rgb[2],
+                base_color.percentage * 0.5,  # Half the percentage
+                index=len(result) + 1,
+            )
+            result.append(new_color)
+
+        color_cycle_index += 1
+        if color_cycle_index >= len(colors):
+            color_cycle_index = 0
+            variation_index += 1
+            strength += 0.1  # Increase variation strength each cycle
+
+        # Safety: prevent infinite loop
+        if variation_index > 10:
+            break
+
+    return result
+
+
+def _color_distance_hsl(c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> float:
+    return s
+
+
 def _color_distance_hsl(c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> float:
     """
     Calculate perceptual color distance in HSL space.
@@ -912,89 +1060,85 @@ class PaletteExtractor:
                 chromatic_colors_glow.append(color_info)
 
         # =====================================================================
-        # ALL METHODS: Use 7-family approach for maximum color diversity
-        # Families: rot, orange, gelb, grün, blau, violett, braun
+        # METHOD-SPECIFIC COLOR SELECTION
+        # Each method now has distinct behavior for unique results
         # =====================================================================
 
-        # Step 1: Get family anchors (one most vibrant per family present)
+        # Get family anchors for methods that use them
         family_anchors = _get_family_anchors(chromatic_colors)
 
-        # Step 2: Select colors based on method
         if self.settings.palette_method == PaletteMethod.INTENSIFY:
-            # INTENSIFY: Start with family anchors, fill with most VIBRANT
-            colors = family_anchors[: self.settings.num_colors]
+            # ---------------------------------------------------------------
+            # INTENSIFY: Pure saturation focus - NO family balancing
+            # Just the N most saturated colors, period.
+            # This gives the most VIBRANT palette possible.
+            # ---------------------------------------------------------------
+            sorted_by_saturation = sorted(
+                chromatic_colors,
+                key=lambda c: _get_color_saturation(*c.rgb),
+                reverse=True
+            )
+            colors = sorted_by_saturation[: self.settings.num_colors]
 
-            # Fill remaining with most vibrant (by saturation), max 2 per family
+        elif self.settings.palette_method == PaletteMethod.SATURATED:
+            # ---------------------------------------------------------------
+            # SATURATED: High saturation threshold (40%+) + family diversity
+            # Only colors with S >= 40%, then family anchors first
+            # ---------------------------------------------------------------
+            high_sat_colors = [
+                c for c in chromatic_colors
+                if _get_color_saturation(*c.rgb) >= 40.0
+            ]
+            if not high_sat_colors:
+                high_sat_colors = chromatic_colors
+
+            # Get anchors from high-saturation pool only
+            sat_anchors = _get_family_anchors(high_sat_colors)
+            colors = sat_anchors[: self.settings.num_colors]
+
+            # Fill with remaining high-saturation colors
             if len(colors) < self.settings.num_colors:
-                remaining = [c for c in chromatic_colors if c not in colors]
-                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-
-                for candidate in remaining:
-                    if len(colors) >= self.settings.num_colors:
-                        break
-                    candidate_family = _get_color_family(candidate.rgb)
-                    family_count = sum(1 for c in colors if _get_color_family(c.rgb) == candidate_family)
-                    if family_count < 2:
-                        colors.append(candidate)
-
-            # Fill any remaining (ignore family limit)
-            if len(colors) < self.settings.num_colors:
-                remaining = [c for c in chromatic_colors if c not in colors]
+                remaining = [c for c in high_sat_colors if c not in colors]
                 remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
         elif self.settings.palette_method == PaletteMethod.DIVERSE:
-            # DIVERSE: Start with family anchors, fill with most DISTANT colors
+            # ---------------------------------------------------------------
+            # DIVERSE: Maximum color DISTANCE in HSL space
+            # Focus on contrast, not saturation or family
+            # ---------------------------------------------------------------
             colors = _select_diverse_colors(
                 chromatic_colors if chromatic_colors else all_colors,
                 self.settings.num_colors,
-                min_saturation=20.0,
+                min_saturation=15.0,  # Lower threshold for more diversity
             )
 
-            # Verify family diversity
-            if not _check_family_diversity(colors):
-                # Recalculate with forced family anchors
-                colors = family_anchors[: self.settings.num_colors]
-                if len(colors) < self.settings.num_colors:
-                    remaining = [c for c in chromatic_colors if c not in colors]
-                    for candidate in remaining:
-                        if len(colors) >= self.settings.num_colors:
-                            break
-                        candidate_family = _get_color_family(candidate.rgb)
-                        existing_families = [_get_color_family(c.rgb) for c in colors]
-                        if candidate_family not in existing_families or existing_families.count(candidate_family) < 2:
-                            colors.append(candidate)
-
-        elif self.settings.palette_method == PaletteMethod.SATURATED:
-            # SATURATED: Start with family anchors, fill with most SATURATED
-            colors = family_anchors[: self.settings.num_colors]
-
-            if len(colors) < self.settings.num_colors:
-                remaining = [c for c in chromatic_colors if c not in colors]
-                remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                colors.extend(remaining[: self.settings.num_colors - len(colors)])
-
         elif self.settings.palette_method == PaletteMethod.GLOW:
-            # GLOW: Start with family anchors, then fill with LIGHTEST colors
-            # cycling through families by frequency (most frequent first)
-            # Uses extended color pool with more permissive saturation thresholds
-            # to find light but still chromatic colors
+            # ---------------------------------------------------------------
+            # GLOW: Lightest colors with family cycling
+            # Family anchors first, then cycle through families taking
+            # the LIGHTEST remaining color from each
+            # ---------------------------------------------------------------
             colors = _select_glow_colors(
                 chromatic_colors_glow if chromatic_colors_glow else all_colors,
                 self.settings.num_colors,
             )
 
         elif self.settings.palette_method == PaletteMethod.LUMINOUS:
-            # LUMINOUS: Compromise between DIVERSE and GLOW
-            # Balances maximum contrast with lightness/frequency
-            # Uses extended color pool with more permissive saturation thresholds
+            # ---------------------------------------------------------------
+            # LUMINOUS: Balanced approach (50% diverse, 50% glow)
+            # Good for paintings that need both contrast and light tones
+            # ---------------------------------------------------------------
             colors = _select_luminous_colors(
                 chromatic_colors_glow if chromatic_colors_glow else all_colors,
                 self.settings.num_colors,
             )
 
         else:
-            # STANDARD: Start with family anchors, fill by AREA (percentage)
+            # ---------------------------------------------------------------
+            # STANDARD: Family anchors + area percentage
+            # Good default for representative palettes
+            # ---------------------------------------------------------------
             colors = family_anchors[: self.settings.num_colors]
 
             if len(colors) < self.settings.num_colors:
@@ -1003,12 +1147,21 @@ class PaletteExtractor:
                 colors.extend(remaining[: self.settings.num_colors - len(colors)])
 
         # =====================================================================
-        # FINAL FALLBACK: Ensure all slots filled
+        # FILL MISSING SLOTS: Ensure all requested colors are provided
         # =====================================================================
         if len(colors) < self.settings.num_colors:
+            # First try: use remaining chromatic colors
             remaining = [c for c in all_colors if c not in colors]
             remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
             colors.extend(remaining[: self.settings.num_colors - len(colors)])
+
+        # Second: if still missing, generate method-appropriate variations
+        if len(colors) < self.settings.num_colors:
+            colors = _fill_missing_colors(
+                colors,
+                self.settings.num_colors,
+                self.settings.palette_method,
+            )
 
         # =====================================================================
         # GRAY AVOIDANCE: Replace any remaining gray-named colors
