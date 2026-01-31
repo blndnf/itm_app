@@ -302,18 +302,6 @@ class SettingsPanel(QWidget):
         extract_row.addWidget(self._palette_method_combo)
         sort_layout.addLayout(extract_row)
 
-        # Sort method
-        method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Sortierung:"))
-        self._sort_combo = QComboBox()
-        self._sort_combo.addItem("Farbfamilie (Warm→Kalt)", SortMethod.FAMILY)
-        self._sort_combo.addItem("Nach Farbton", SortMethod.HUE)
-        self._sort_combo.addItem("Nach Helligkeit", SortMethod.LIGHTNESS)
-        self._sort_combo.addItem("Nach Sättigung", SortMethod.SATURATION)
-        self._sort_combo.addItem("Nach Fläche", SortMethod.PERCENTAGE)
-        method_row.addWidget(self._sort_combo)
-        sort_layout.addLayout(method_row)
-
         # Add numbers checkbox
         self._add_numbers_checkbox = QCheckBox("Nummern anzeigen")
         self._add_numbers_checkbox.setChecked(True)
@@ -499,8 +487,8 @@ class SettingsPanel(QWidget):
         return self._palette_method_combo.currentData()
 
     def get_sort_method(self) -> SortMethod:
-        """Get the selected palette sort method."""
-        return self._sort_combo.currentData()
+        """Get the palette sort method (always FAMILY - warm to cold)."""
+        return SortMethod.FAMILY  # Fixed: always sort by color family
 
     def get_grays_position(self) -> str:
         """Get grays position (always 'end')."""

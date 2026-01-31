@@ -268,6 +268,274 @@ def _is_chromatic_dynamic(r: int, g: int, b: int, for_glow: bool = False) -> boo
 # The 7 artist color families for palette diversity
 COLOR_FAMILIES = ["rot", "orange", "gelb", "grün", "blau", "violett", "braun"]
 
+# Complementary family pairs (for INTENSIFY method)
+# Based on color wheel: opposite hues create strongest contrast
+COMPLEMENTARY_PAIRS = [
+    ("orange", "blau"),    # ~30° ↔ ~210°
+    ("gelb", "violett"),   # ~60° ↔ ~270°
+    ("rot", "grün"),       # ~0° ↔ ~120°
+    ("braun", "blau"),     # Earthy warm ↔ cold
+]
+
+# Hue angles for each family (for DIVERSE method - color wheel spread)
+FAMILY_HUE_ANGLES = {
+    "rot": 0,
+    "orange": 30,
+    "gelb": 60,
+    "grün": 120,
+    "blau": 210,
+    "violett": 270,
+    "braun": 25,  # Between red and orange
+}
+
+
+def _get_family_stats(chromatic_colors: List["ColorInfo"]) -> Dict[str, Dict]:
+    """
+    Calculate statistics for each color family present in the image.
+
+    Returns dict with family -> {
+        'colors': List of ColorInfo,
+        'area': Total percentage,
+        'max_saturation': Highest saturation in family,
+        'max_lightness': Highest lightness in family,
+        'intensity': saturation * lightness (for dominance calc),
+        'anchor': Most vibrant color (family representative)
+    }
+    """
+    from collections import defaultdict
+
+    family_data = defaultdict(lambda: {
+        'colors': [],
+        'area': 0.0,
+        'max_saturation': 0.0,
+        'max_lightness': 0.0,
+        'intensity': 0.0,
+        'anchor': None
+    })
+
+    for c in chromatic_colors:
+        family = _get_color_family(c.rgb)
+        if family in ("gray", "extreme"):
+            continue
+
+        h, s, l = _get_hsl(c.rgb)
+
+        family_data[family]['colors'].append(c)
+        family_data[family]['area'] += c.percentage
+
+        if s > family_data[family]['max_saturation']:
+            family_data[family]['max_saturation'] = s
+
+        if l > family_data[family]['max_lightness']:
+            family_data[family]['max_lightness'] = l
+
+        # Intensity = saturation * lightness (normalized)
+        intensity = (s / 100.0) * (l / 100.0)
+        if intensity > family_data[family]['intensity']:
+            family_data[family]['intensity'] = intensity
+
+        # Anchor = most saturated color in family
+        if family_data[family]['anchor'] is None or s > _get_color_saturation(*family_data[family]['anchor'].rgb):
+            family_data[family]['anchor'] = c
+
+    return dict(family_data)
+
+
+def _rank_families_by_criterion(
+    family_stats: Dict[str, Dict],
+    criterion: str
+) -> List[Tuple[str, "ColorInfo"]]:
+    """
+    Rank families by a criterion and return (family, anchor) pairs.
+
+    Criteria:
+    - 'area': By total percentage (largest first)
+    - 'saturation': By max saturation (most saturated first)
+    - 'lightness': By max lightness (lightest first)
+    - 'intensity': By saturation × lightness (most intense first)
+    """
+    families = list(family_stats.keys())
+
+    if criterion == 'area':
+        families.sort(key=lambda f: family_stats[f]['area'], reverse=True)
+    elif criterion == 'saturation':
+        families.sort(key=lambda f: family_stats[f]['max_saturation'], reverse=True)
+    elif criterion == 'lightness':
+        families.sort(key=lambda f: family_stats[f]['max_lightness'], reverse=True)
+    elif criterion == 'intensity':
+        families.sort(key=lambda f: family_stats[f]['intensity'], reverse=True)
+
+    return [(f, family_stats[f]['anchor']) for f in families if family_stats[f]['anchor']]
+
+
+def _get_complementary_pair_scores(
+    family_stats: Dict[str, Dict]
+) -> List[Tuple[str, str, float, "ColorInfo", "ColorInfo"]]:
+    """
+    Score complementary pairs by their combined dominance.
+
+    Dominance = rank_by_intensity × rank_by_area (lower = more dominant)
+
+    Returns list of (family1, family2, score, anchor1, anchor2) sorted by score.
+    The first family in each pair is the LIGHTER one (to be filled first).
+    """
+    # Get intensity and area ranks
+    intensity_ranked = _rank_families_by_criterion(family_stats, 'intensity')
+    area_ranked = _rank_families_by_criterion(family_stats, 'area')
+
+    intensity_rank = {f: i + 1 for i, (f, _) in enumerate(intensity_ranked)}
+    area_rank = {f: i + 1 for i, (f, _) in enumerate(area_ranked)}
+
+    # Calculate dominance for each family
+    dominance = {}
+    for family in family_stats:
+        if family in intensity_rank and family in area_rank:
+            dominance[family] = intensity_rank[family] * area_rank[family]
+
+    # Score each complementary pair
+    pair_scores = []
+    for f1, f2 in COMPLEMENTARY_PAIRS:
+        if f1 in family_stats and f2 in family_stats:
+            # Combined score = product of dominances (lower = more dominant pair)
+            score = dominance.get(f1, 999) * dominance.get(f2, 999)
+
+            # Determine which is lighter (to fill first)
+            l1 = family_stats[f1]['max_lightness']
+            l2 = family_stats[f2]['max_lightness']
+
+            if l1 >= l2:
+                pair_scores.append((f1, f2, score, family_stats[f1]['anchor'], family_stats[f2]['anchor']))
+            else:
+                pair_scores.append((f2, f1, score, family_stats[f2]['anchor'], family_stats[f1]['anchor']))
+
+    # Sort by score (lower = more dominant pair first)
+    pair_scores.sort(key=lambda x: x[2])
+    return pair_scores
+
+
+def _get_optimal_hue_spread(num_colors: int) -> float:
+    """
+    Get the optimal hue angle separation for N colors on color wheel.
+
+    2 colors: 180° (opposite)
+    3 colors: 120° (triadic)
+    4 colors: 90° (tetradic)
+    etc.
+    """
+    if num_colors <= 1:
+        return 360.0
+    return 360.0 / num_colors
+
+
+def _find_closest_family_to_angle(
+    target_angle: float,
+    available_families: List[str]
+) -> Optional[str]:
+    """
+    Find the family whose hue angle is closest to the target angle.
+    """
+    if not available_families:
+        return None
+
+    best_family = None
+    best_diff = float('inf')
+
+    for family in available_families:
+        family_angle = FAMILY_HUE_ANGLES.get(family, 0)
+        # Circular distance
+        diff = min(abs(family_angle - target_angle), 360 - abs(family_angle - target_angle))
+        if diff < best_diff:
+            best_diff = diff
+            best_family = family
+
+    return best_family
+
+
+def _blend_colors(c1: "ColorInfo", c2: "ColorInfo") -> Tuple[int, int, int]:
+    """
+    Blend two colors to their average RGB.
+    """
+    r = (c1.rgb[0] + c2.rgb[0]) // 2
+    g = (c1.rgb[1] + c2.rgb[1]) // 2
+    b = (c1.rgb[2] + c2.rgb[2]) // 2
+    return (r, g, b)
+
+
+def _balance_family_distribution(
+    colors: List["ColorInfo"],
+    family_stats: Dict[str, Dict],
+    method: "PaletteMethod",
+    chromatic_colors: List["ColorInfo"]
+) -> List["ColorInfo"]:
+    """
+    Post-processing: Balance family distribution in palette.
+
+    If one family appears 3x more than the next family:
+    - Cluster two lower-ranked colors of that family to their average
+    - Fill the freed slot with the next family's color
+    """
+    if len(colors) < 3:
+        return colors
+
+    # Count colors per family
+    family_counts = {}
+    family_colors = {}
+    for i, c in enumerate(colors):
+        family = _get_color_family(c.rgb)
+        if family not in ("gray", "extreme"):
+            family_counts[family] = family_counts.get(family, 0) + 1
+            if family not in family_colors:
+                family_colors[family] = []
+            family_colors[family].append((i, c))
+
+    if len(family_counts) < 2:
+        return colors
+
+    # Sort families by count
+    sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
+
+    result = list(colors)
+
+    # Check if dominant family is 3x more than next
+    if len(sorted_families) >= 2:
+        dominant_family, dominant_count = sorted_families[0]
+        next_family, next_count = sorted_families[1]
+
+        if dominant_count >= 3 and dominant_count >= next_count * 3:
+            # Find two lowest-saturation colors from dominant family
+            dominant_colors = family_colors[dominant_family]
+            dominant_colors.sort(key=lambda x: _get_color_saturation(*x[1].rgb))
+
+            if len(dominant_colors) >= 2:
+                # Get the two lowest saturation ones
+                idx1, color1 = dominant_colors[0]
+                idx2, color2 = dominant_colors[1]
+
+                # Blend them
+                blended_rgb = _blend_colors(color1, color2)
+                blended_color = ColorInfo.from_rgb(
+                    blended_rgb[0], blended_rgb[1], blended_rgb[2],
+                    (color1.percentage + color2.percentage) / 2,
+                    color1.index
+                )
+
+                # Replace first with blend
+                result[idx1] = blended_color
+
+                # Replace second with next best family color (not in palette)
+                # Find colors from families not well represented
+                used_families = set(_get_color_family(c.rgb) for c in result if c != result[idx2])
+
+                for c in chromatic_colors:
+                    c_family = _get_color_family(c.rgb)
+                    if c_family not in ("gray", "extreme") and c not in result:
+                        # Prefer underrepresented families
+                        if c_family not in used_families or family_counts.get(c_family, 0) < 2:
+                            result[idx2] = c
+                            break
+
+    return result
+
 
 def _get_color_family(rgb: Tuple[int, int, int], for_glow: bool = False) -> str:
     """
@@ -1056,157 +1324,267 @@ class PaletteExtractor:
                 chromatic_colors_glow.append(color_info)
 
         # =====================================================================
-        # CRITICAL: GUARANTEE ALL IMAGE FAMILIES ARE REPRESENTED
-        # If an image contains N color families, the palette MUST contain
-        # at least one color from each family (if num_colors >= N)
+        # ANALYZE IMAGE: Get statistics for each color family present
+        # =====================================================================
+        family_stats = _get_family_stats(chromatic_colors)
+        present_families = list(family_stats.keys())
+        num_families = len(present_families)
+
+        # =====================================================================
+        # METHOD-SPECIFIC COLOR SELECTION
+        # All methods: First fill one color per family, then add more by method
         # =====================================================================
 
-        # Step 1: Get family anchors - one most vibrant color per family present
-        family_anchors = _get_family_anchors(chromatic_colors)
-        num_families = len(family_anchors)
+        colors = []
+        num_colors = self.settings.num_colors
 
-        # Step 2: Determine how to select colors based on method
-        # RULE: If num_colors >= num_families, ALL families must be represented
-        # RULE: If num_colors < num_families, method decides which families
+        if self.settings.palette_method == PaletteMethod.STANDARD:
+            # -----------------------------------------------------------------
+            # STANDARD: Fill by AREA (most dominant family first)
+            # -----------------------------------------------------------------
+            ranked = _rank_families_by_criterion(family_stats, 'area')
 
-        if self.settings.num_colors >= num_families:
-            # ===============================================================
-            # ENOUGH SLOTS: Guarantee all families, then fill by method
-            # ===============================================================
-            colors = list(family_anchors)  # Start with ALL family anchors
+            # First pass: one color per family (most dominant families first)
+            for family, anchor in ranked[:num_colors]:
+                colors.append(anchor)
 
-            # Fill remaining slots according to method
-            remaining_slots = self.settings.num_colors - len(colors)
+            # Second pass: fill remaining slots cycling through families
+            if len(colors) < num_colors:
+                for family, _ in ranked:
+                    if len(colors) >= num_colors:
+                        break
+                    # Get second-most dominant color in this family
+                    family_colors_sorted = sorted(
+                        family_stats[family]['colors'],
+                        key=lambda c: c.percentage,
+                        reverse=True
+                    )
+                    for c in family_colors_sorted:
+                        if c not in colors:
+                            colors.append(c)
+                            break
+                    if len(colors) >= num_colors:
+                        break
 
-            if remaining_slots > 0:
-                if self.settings.palette_method == PaletteMethod.INTENSIFY:
-                    # Fill with most SATURATED colors (not already selected)
-                    remaining = [c for c in chromatic_colors if c not in colors]
-                    remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                    colors.extend(remaining[:remaining_slots])
+        elif self.settings.palette_method == PaletteMethod.SATURATED:
+            # -----------------------------------------------------------------
+            # SATURATED: Fill by SATURATION (most saturated family first)
+            # -----------------------------------------------------------------
+            ranked = _rank_families_by_criterion(family_stats, 'saturation')
 
-                elif self.settings.palette_method == PaletteMethod.SATURATED:
-                    # Fill with high-saturation colors only (S >= 40%)
-                    remaining = [
-                        c for c in chromatic_colors
-                        if c not in colors and _get_color_saturation(*c.rgb) >= 40.0
-                    ]
-                    remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                    colors.extend(remaining[:remaining_slots])
+            # First pass: one color per family
+            for family, anchor in ranked[:num_colors]:
+                colors.append(anchor)
 
-                elif self.settings.palette_method == PaletteMethod.DIVERSE:
-                    # Fill with most DISTANT colors
-                    remaining = [c for c in chromatic_colors if c not in colors]
-                    while len(colors) < self.settings.num_colors and remaining:
-                        best_color = None
-                        best_dist = -1
-                        for candidate in remaining:
-                            min_dist = min(
-                                _color_distance_hsl(candidate.rgb, sel.rgb)
-                                for sel in colors
-                            )
-                            if min_dist > best_dist:
-                                best_dist = min_dist
-                                best_color = candidate
-                        if best_color:
-                            colors.append(best_color)
-                            remaining.remove(best_color)
-                        else:
+            # Second pass: fill with second-most saturated per family
+            if len(colors) < num_colors:
+                for family, _ in ranked:
+                    if len(colors) >= num_colors:
+                        break
+                    family_colors_sorted = sorted(
+                        family_stats[family]['colors'],
+                        key=lambda c: _get_color_saturation(*c.rgb),
+                        reverse=True
+                    )
+                    for c in family_colors_sorted:
+                        if c not in colors:
+                            colors.append(c)
                             break
 
-                elif self.settings.palette_method == PaletteMethod.GLOW:
-                    # Fill with LIGHTEST colors, cycling through families
-                    pool = chromatic_colors_glow if chromatic_colors_glow else chromatic_colors
-                    remaining = [c for c in pool if c not in colors]
-                    remaining.sort(key=lambda c: _get_color_lightness(*c.rgb), reverse=True)
-                    colors.extend(remaining[:remaining_slots])
+        elif self.settings.palette_method == PaletteMethod.GLOW:
+            # -----------------------------------------------------------------
+            # GLOW: Fill by LIGHTNESS (lightest family first)
+            # -----------------------------------------------------------------
+            # Use glow pool for lighter colors
+            glow_stats = _get_family_stats(chromatic_colors_glow if chromatic_colors_glow else chromatic_colors)
+            ranked = _rank_families_by_criterion(glow_stats, 'lightness')
 
-                elif self.settings.palette_method == PaletteMethod.LUMINOUS:
-                    # Fill balancing lightness and diversity
-                    pool = chromatic_colors_glow if chromatic_colors_glow else chromatic_colors
-                    remaining = [c for c in pool if c not in colors]
-                    while len(colors) < self.settings.num_colors and remaining:
-                        best_color = None
-                        best_score = -1
-                        for candidate in remaining:
-                            min_dist = min(
-                                _color_distance_hsl(candidate.rgb, sel.rgb)
-                                for sel in colors
-                            )
-                            lightness = _get_color_lightness(*candidate.rgb) / 100.0
-                            score = 0.5 * min_dist + 0.5 * lightness
-                            if score > best_score:
-                                best_score = score
-                                best_color = candidate
-                        if best_color:
-                            colors.append(best_color)
-                            remaining.remove(best_color)
-                        else:
+            # First pass: one color per family (lightest families first)
+            for family, anchor in ranked[:num_colors]:
+                colors.append(anchor)
+
+            # Second pass: fill with second-lightest per family
+            if len(colors) < num_colors:
+                for family, _ in ranked:
+                    if len(colors) >= num_colors:
+                        break
+                    if family in glow_stats:
+                        family_colors_sorted = sorted(
+                            glow_stats[family]['colors'],
+                            key=lambda c: _get_color_lightness(*c.rgb),
+                            reverse=True
+                        )
+                        for c in family_colors_sorted:
+                            if c not in colors:
+                                colors.append(c)
+                                break
+
+        elif self.settings.palette_method == PaletteMethod.INTENSIFY:
+            # -----------------------------------------------------------------
+            # INTENSIFY: Fill by COMPLEMENTARY PAIRS for maximum contrast
+            # Dominance = intensity_rank × area_rank (lower = more dominant)
+            # Complementary pairs scored by combined dominance
+            # -----------------------------------------------------------------
+            pair_scores = _get_complementary_pair_scores(family_stats)
+            used_families = set()
+
+            # Fill slots from complementary pairs (lighter color first in each pair)
+            for f1, f2, score, anchor1, anchor2 in pair_scores:
+                if len(colors) >= num_colors:
+                    break
+
+                # Add lighter color of pair first
+                if f1 not in used_families and len(colors) < num_colors:
+                    colors.append(anchor1)
+                    used_families.add(f1)
+
+                # Then add the complementary color
+                if f2 not in used_families and len(colors) < num_colors:
+                    colors.append(anchor2)
+                    used_families.add(f2)
+
+            # Fill remaining families not in pairs
+            for family in present_families:
+                if len(colors) >= num_colors:
+                    break
+                if family not in used_families:
+                    colors.append(family_stats[family]['anchor'])
+                    used_families.add(family)
+
+            # Fill remaining slots with second colors from dominant pairs
+            if len(colors) < num_colors:
+                for f1, f2, score, _, _ in pair_scores:
+                    if len(colors) >= num_colors:
+                        break
+                    for family in [f1, f2]:
+                        if len(colors) >= num_colors:
                             break
+                        family_colors_sorted = sorted(
+                            family_stats[family]['colors'],
+                            key=lambda c: _get_color_saturation(*c.rgb) * _get_color_lightness(*c.rgb),
+                            reverse=True
+                        )
+                        for c in family_colors_sorted:
+                            if c not in colors:
+                                colors.append(c)
+                                break
 
-                else:  # STANDARD
-                    # Fill by area percentage
-                    remaining = [c for c in chromatic_colors if c not in colors]
-                    remaining.sort(key=lambda c: c.percentage, reverse=True)
-                    colors.extend(remaining[:remaining_slots])
+        elif self.settings.palette_method == PaletteMethod.DIVERSE:
+            # -----------------------------------------------------------------
+            # DIVERSE: Fill by COLOR WHEEL SPREAD (360°/N separation)
+            # Start with most dominant color, then find colors at optimal angles
+            # -----------------------------------------------------------------
+            # Score colors by area × luminance × saturation
+            def diverse_score(c):
+                return c.percentage * _get_color_lightness(*c.rgb) * _get_color_saturation(*c.rgb) / 10000.0
+
+            all_chromatic_scored = sorted(chromatic_colors, key=diverse_score, reverse=True)
+
+            if all_chromatic_scored:
+                # First color: highest score
+                first_color = all_chromatic_scored[0]
+                colors.append(first_color)
+                first_hue = _get_hsl(first_color.rgb)[0]
+
+                # Calculate optimal spread angle
+                optimal_spread = _get_optimal_hue_spread(num_colors)
+
+                # Find colors at optimal angles
+                for i in range(1, num_colors):
+                    if len(colors) >= num_colors:
+                        break
+
+                    target_angle = (first_hue + i * optimal_spread) % 360
+
+                    # Find best color near target angle (not already selected)
+                    best_color = None
+                    best_score = -1
+
+                    for c in chromatic_colors:
+                        if c in colors:
+                            continue
+                        c_hue = _get_hsl(c.rgb)[0]
+                        # Circular distance to target
+                        angle_diff = min(abs(c_hue - target_angle), 360 - abs(c_hue - target_angle))
+                        # Score: closer to target angle + higher diverse_score
+                        angle_score = 1.0 - (angle_diff / 180.0)  # 1.0 = exact, 0.0 = opposite
+                        combined_score = angle_score * 0.7 + diverse_score(c) * 0.3
+
+                        if combined_score > best_score:
+                            best_score = combined_score
+                            best_color = c
+
+                    if best_color:
+                        colors.append(best_color)
+
+        elif self.settings.palette_method == PaletteMethod.LUMINOUS:
+            # -----------------------------------------------------------------
+            # LUMINOUS: Average of INTENSIFY and GLOW approaches
+            # Calculate both, then blend/merge the results
+            # -----------------------------------------------------------------
+            # Get INTENSIFY colors
+            intensify_colors = []
+            pair_scores = _get_complementary_pair_scores(family_stats)
+            used_families = set()
+            for f1, f2, score, anchor1, anchor2 in pair_scores:
+                if len(intensify_colors) >= num_colors:
+                    break
+                if f1 not in used_families:
+                    intensify_colors.append(anchor1)
+                    used_families.add(f1)
+                if f2 not in used_families and len(intensify_colors) < num_colors:
+                    intensify_colors.append(anchor2)
+                    used_families.add(f2)
+            for family in present_families:
+                if len(intensify_colors) >= num_colors:
+                    break
+                if family not in used_families:
+                    intensify_colors.append(family_stats[family]['anchor'])
+
+            # Get GLOW colors
+            glow_stats = _get_family_stats(chromatic_colors_glow if chromatic_colors_glow else chromatic_colors)
+            glow_ranked = _rank_families_by_criterion(glow_stats, 'lightness')
+            glow_colors = [anchor for _, anchor in glow_ranked[:num_colors]]
+
+            # Merge: for each family, average the colors from both methods
+            family_merged = {}
+            for c in intensify_colors + glow_colors:
+                family = _get_color_family(c.rgb)
+                if family not in family_merged:
+                    family_merged[family] = []
+                family_merged[family].append(c)
+
+            # Create merged palette
+            for family, family_colors_list in family_merged.items():
+                if len(colors) >= num_colors:
+                    break
+                if len(family_colors_list) == 1:
+                    colors.append(family_colors_list[0])
+                else:
+                    # Blend colors from same family
+                    avg_rgb = _blend_colors(family_colors_list[0], family_colors_list[1])
+                    # Find closest actual color to this blend
+                    closest = min(
+                        chromatic_colors,
+                        key=lambda c: _color_distance_hsl(c.rgb, avg_rgb)
+                    )
+                    if closest not in colors:
+                        colors.append(closest)
+                    elif family_colors_list[0] not in colors:
+                        colors.append(family_colors_list[0])
 
         else:
-            # ===============================================================
-            # FEWER SLOTS THAN FAMILIES: Method decides which families
-            # ===============================================================
-            if self.settings.palette_method == PaletteMethod.INTENSIFY:
-                # Select families with highest saturation colors
-                sorted_anchors = sorted(
-                    family_anchors,
-                    key=lambda c: _get_color_saturation(*c.rgb),
-                    reverse=True
-                )
-                colors = sorted_anchors[:self.settings.num_colors]
+            # Fallback: use family anchors
+            family_anchors = _get_family_anchors(chromatic_colors)
+            colors = family_anchors[:num_colors]
 
-            elif self.settings.palette_method == PaletteMethod.SATURATED:
-                # Select families with S >= 40% colors, sorted by saturation
-                high_sat_anchors = [
-                    c for c in family_anchors
-                    if _get_color_saturation(*c.rgb) >= 40.0
-                ]
-                if not high_sat_anchors:
-                    high_sat_anchors = family_anchors
-                high_sat_anchors.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-                colors = high_sat_anchors[:self.settings.num_colors]
-
-            elif self.settings.palette_method == PaletteMethod.DIVERSE:
-                # Select families with maximum mutual distance
-                colors = _select_diverse_colors(
-                    family_anchors,
-                    self.settings.num_colors,
-                    min_saturation=10.0,
-                )
-
-            elif self.settings.palette_method == PaletteMethod.GLOW:
-                # Select families with lightest anchor colors
-                sorted_anchors = sorted(
-                    family_anchors,
-                    key=lambda c: _get_color_lightness(*c.rgb),
-                    reverse=True
-                )
-                colors = sorted_anchors[:self.settings.num_colors]
-
-            elif self.settings.palette_method == PaletteMethod.LUMINOUS:
-                # Balance: 50% by lightness, 50% by saturation
-                def luminous_score(c):
-                    return 0.5 * _get_color_lightness(*c.rgb) + 0.5 * _get_color_saturation(*c.rgb)
-                sorted_anchors = sorted(family_anchors, key=luminous_score, reverse=True)
-                colors = sorted_anchors[:self.settings.num_colors]
-
-            else:  # STANDARD
-                # Select families by total area percentage
-                families_by_area = _get_family_by_area(chromatic_colors)
-                colors = []
-                for family in families_by_area[:self.settings.num_colors]:
-                    for anchor in family_anchors:
-                        if _get_color_family(anchor.rgb) == family:
-                            colors.append(anchor)
-                            break
+        # =====================================================================
+        # POST-PROCESSING: Balance family distribution
+        # If one family has 3x more colors than next, cluster and redistribute
+        # =====================================================================
+        colors = _balance_family_distribution(
+            colors, family_stats, self.settings.palette_method, chromatic_colors
+        )
 
         # =====================================================================
         # FILL MISSING SLOTS: Ensure all requested colors are provided
