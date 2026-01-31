@@ -470,69 +470,130 @@ def _balance_family_distribution(
     """
     Post-processing: Balance family distribution in palette.
 
-    If one family appears 3x more than the next family:
-    - Cluster two lower-ranked colors of that family to their average
-    - Fill the freed slot with the next family's color
+    RULES:
+    1. Every present family must have at least 1 color
+    2. No family can have more than 2x the colors of the next family
+       (If ratio > 2:1, cluster two lowest-saturation of dominant family,
+        fill freed slot with underrepresented family)
+    3. Apply recursively (domino effect) until balanced
     """
     if len(colors) < 3:
         return colors
 
-    # Count colors per family
-    family_counts = {}
-    family_colors = {}
-    for i, c in enumerate(colors):
-        family = _get_color_family(c.rgb)
-        if family not in ("gray", "extreme"):
-            family_counts[family] = family_counts.get(family, 0) + 1
-            if family not in family_colors:
-                family_colors[family] = []
-            family_colors[family].append((i, c))
-
-    if len(family_counts) < 2:
-        return colors
-
-    # Sort families by count
-    sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
-
     result = list(colors)
+    max_iterations = 10  # Prevent infinite loops
 
-    # Check if dominant family is 3x more than next
-    if len(sorted_families) >= 2:
-        dominant_family, dominant_count = sorted_families[0]
-        next_family, next_count = sorted_families[1]
+    for iteration in range(max_iterations):
+        # Count colors per family in current result
+        family_counts = {}
+        family_colors = {}
+        for i, c in enumerate(result):
+            family = _get_color_family(c.rgb)
+            if family not in ("gray", "extreme"):
+                family_counts[family] = family_counts.get(family, 0) + 1
+                if family not in family_colors:
+                    family_colors[family] = []
+                family_colors[family].append((i, c))
 
-        if dominant_count >= 3 and dominant_count >= next_count * 3:
-            # Find two lowest-saturation colors from dominant family
-            dominant_colors = family_colors[dominant_family]
-            dominant_colors.sort(key=lambda x: _get_color_saturation(*x[1].rgb))
+        if len(family_counts) < 2:
+            break
 
-            if len(dominant_colors) >= 2:
-                # Get the two lowest saturation ones
-                idx1, color1 = dominant_colors[0]
-                idx2, color2 = dominant_colors[1]
+        # Sort families by count (descending)
+        sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
 
-                # Blend them
-                blended_rgb = _blend_colors(color1, color2)
-                blended_color = ColorInfo.from_rgb(
-                    blended_rgb[0], blended_rgb[1], blended_rgb[2],
-                    (color1.percentage + color2.percentage) / 2,
-                    color1.index
-                )
+        # Find ANY pair where ratio > 2:1
+        found_imbalance = False
+        dominant_family = None
+        underrepresented_family = None
 
-                # Replace first with blend
-                result[idx1] = blended_color
+        for i in range(len(sorted_families)):
+            fam_i, count_i = sorted_families[i]
+            for j in range(i + 1, len(sorted_families)):
+                fam_j, count_j = sorted_families[j]
+                # Check if ratio > 2:1 (i.e., count_i > count_j * 2)
+                if count_i > count_j * 2 and count_i >= 3:
+                    dominant_family = fam_i
+                    underrepresented_family = fam_j
+                    found_imbalance = True
+                    break
+            if found_imbalance:
+                break
 
-                # Replace second with next best family color (not in palette)
-                # Find colors from families not well represented
-                used_families = set(_get_color_family(c.rgb) for c in result if c != result[idx2])
+        # Also check: are there families in the IMAGE that are NOT in the palette?
+        if not found_imbalance:
+            present_in_image = set(family_stats.keys())
+            present_in_palette = set(family_counts.keys())
+            missing_families = present_in_image - present_in_palette
 
-                for c in chromatic_colors:
-                    c_family = _get_color_family(c.rgb)
-                    if c_family not in ("gray", "extreme") and c not in result:
-                        # Prefer underrepresented families
-                        if c_family not in used_families or family_counts.get(c_family, 0) < 2:
-                            result[idx2] = c
-                            break
+            if missing_families and len(sorted_families) > 0:
+                # Find most dominant family in palette that has > 1 color
+                for fam, count in sorted_families:
+                    if count >= 2:
+                        dominant_family = fam
+                        underrepresented_family = list(missing_families)[0]
+                        found_imbalance = True
+                        break
+
+        if not found_imbalance:
+            break  # Palette is balanced
+
+        # Cluster two lowest-saturation colors from dominant family
+        if dominant_family not in family_colors or len(family_colors[dominant_family]) < 2:
+            break
+
+        dominant_colors_list = family_colors[dominant_family]
+        # Sort by saturation (lowest first)
+        dominant_colors_list.sort(key=lambda x: _get_color_saturation(*x[1].rgb))
+
+        # Get the two lowest saturation ones
+        idx1, color1 = dominant_colors_list[0]
+        idx2, color2 = dominant_colors_list[1]
+
+        # Blend them
+        blended_rgb = _blend_colors(color1, color2)
+        blended_color = ColorInfo.from_rgb(
+            blended_rgb[0], blended_rgb[1], blended_rgb[2],
+            (color1.percentage + color2.percentage) / 2,
+            color1.index
+        )
+
+        # Replace first slot with blend
+        result[idx1] = blended_color
+
+        # Replace second slot with best color from underrepresented family
+        replacement_found = False
+
+        # First: try to find a color from the underrepresented family
+        if underrepresented_family and underrepresented_family in family_stats:
+            # Get colors from this family, sorted by saturation (highest first)
+            candidates = sorted(
+                family_stats[underrepresented_family]['colors'],
+                key=lambda c: _get_color_saturation(*c.rgb),
+                reverse=True
+            )
+            for candidate in candidates:
+                if candidate not in result:
+                    result[idx2] = candidate
+                    replacement_found = True
+                    break
+
+        # Fallback: find any color from an underrepresented family
+        if not replacement_found:
+            current_families = set(_get_color_family(c.rgb) for c in result if c != result[idx2])
+            for c in chromatic_colors:
+                c_family = _get_color_family(c.rgb)
+                if c_family not in ("gray", "extreme") and c not in result:
+                    c_family_count = sum(1 for rc in result if _get_color_family(rc.rgb) == c_family and rc != result[idx2])
+                    # Prefer families with fewer colors in palette
+                    if c_family_count < 2:
+                        result[idx2] = c
+                        replacement_found = True
+                        break
+
+        if not replacement_found:
+            # No replacement found, keep original
+            result[idx2] = color2
+            break
 
     return result
 
