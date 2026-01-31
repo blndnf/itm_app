@@ -1109,6 +1109,67 @@ def _generate_color_variation(
     )
 
 
+def _calculate_balanced_slot_distribution(
+    family_counts: Dict[str, int],
+    target_count: int,
+) -> Dict[str, int]:
+    """
+    Calculate how many slots each family should get, respecting 2:1 max ratio.
+
+    Args:
+        family_counts: Current count of colors per family.
+        target_count: Total slots to fill.
+
+    Returns:
+        Dict mapping family -> target slot count.
+    """
+    families = list(family_counts.keys())
+    num_families = len(families)
+
+    if num_families == 0:
+        return {}
+
+    if num_families == 1:
+        # Only one family - gets all slots
+        return {families[0]: target_count}
+
+    # Calculate fair distribution with max 2:1 ratio
+    # With N families and max 2:1 ratio:
+    # If we have 2 families and 12 slots: max is 8:4 (2:1)
+    # If we have 3 families and 12 slots: could be 6:3:3 or 5:4:3, etc.
+
+    # Start with equal distribution
+    base_per_family = target_count // num_families
+    remainder = target_count % num_families
+
+    # Distribute slots, giving extras to families with more current colors
+    sorted_families = sorted(families, key=lambda f: family_counts[f], reverse=True)
+
+    target_slots = {}
+    for i, fam in enumerate(sorted_families):
+        target_slots[fam] = base_per_family + (1 if i < remainder else 0)
+
+    # Enforce max 2:1 ratio
+    # Find min and max, adjust if ratio > 2:1
+    for _ in range(10):  # Iterate to converge
+        min_count = min(target_slots.values())
+        max_count = max(target_slots.values())
+
+        if max_count <= min_count * 2:
+            break  # Ratio is OK
+
+        # Find families with max count and reduce them
+        # Give to families with min count
+        max_families = [f for f, c in target_slots.items() if c == max_count]
+        min_families = [f for f, c in target_slots.items() if c == min_count]
+
+        if max_families and min_families:
+            target_slots[max_families[0]] -= 1
+            target_slots[min_families[0]] += 1
+
+    return target_slots
+
+
 def _fill_missing_colors(
     colors: List[ColorInfo],
     target_count: int,
@@ -1117,8 +1178,9 @@ def _fill_missing_colors(
     """
     Fill missing color slots with method-appropriate variations.
 
-    When fewer colors are found than requested, generate variations
-    of existing colors to fill the remaining slots.
+    CRITICAL: Respects 2:1 max ratio between family slot counts!
+    Distributes slots fairly among families, then fills each family
+    with variations up to its target.
 
     Args:
         colors: Current list of colors.
@@ -1132,7 +1194,22 @@ def _fill_missing_colors(
         return colors[:target_count]
 
     result = list(colors)
-    missing = target_count - len(result)
+
+    # Count current families
+    family_colors: Dict[str, List[ColorInfo]] = {}
+    for c in colors:
+        fam = _get_color_family(c.rgb)
+        if fam not in ("gray", "extreme"):
+            if fam not in family_colors:
+                family_colors[fam] = []
+            family_colors[fam].append(c)
+
+    if not family_colors:
+        return result  # No chromatic colors to work with
+
+    # Calculate target slots per family (respecting 2:1 ratio)
+    current_counts = {f: len(cols) for f, cols in family_colors.items()}
+    target_slots = _calculate_balanced_slot_distribution(current_counts, target_count)
 
     # Determine variation strategy based on method
     if method == PaletteMethod.GLOW or method == PaletteMethod.LUMINOUS:
@@ -1144,44 +1221,54 @@ def _fill_missing_colors(
     else:  # STANDARD
         variation_types = ["lighter", "darker", "desaturated"]
 
-    # Generate variations by cycling through existing colors
-    variation_index = 0
-    color_cycle_index = 0
-    strength = 0.15
+    # Fill each family up to its target slot count
+    for family, target in target_slots.items():
+        family_result_count = sum(1 for c in result if _get_color_family(c.rgb) == family)
 
-    while len(result) < target_count and colors:
-        base_color = colors[color_cycle_index % len(colors)]
-        var_type = variation_types[variation_index % len(variation_types)]
+        if family_result_count >= target:
+            continue  # Already have enough for this family
 
-        # Generate variation
-        new_rgb = _generate_color_variation(base_color.rgb, var_type, strength)
+        base_colors = family_colors.get(family, [])
+        if not base_colors:
+            continue
 
-        # Check if this color is too similar to existing ones
-        is_unique = True
-        for existing in result:
-            dist = _color_distance_hsl(new_rgb, existing.rgb)
-            if dist < 0.1:  # Too similar
-                is_unique = False
-                break
+        slots_to_fill = target - family_result_count
+        variation_index = 0
+        color_cycle_index = 0
+        strength = 0.15
+        attempts = 0
+        max_attempts = slots_to_fill * 20  # Safety limit
 
-        if is_unique:
-            # Create new ColorInfo
-            new_color = ColorInfo.from_rgb(
-                new_rgb[0], new_rgb[1], new_rgb[2],
-                base_color.percentage * 0.5,  # Half the percentage
-                index=len(result) + 1,
-            )
-            result.append(new_color)
+        while slots_to_fill > 0 and attempts < max_attempts:
+            attempts += 1
+            base_color = base_colors[color_cycle_index % len(base_colors)]
+            var_type = variation_types[variation_index % len(variation_types)]
 
-        color_cycle_index += 1
-        if color_cycle_index >= len(colors):
-            color_cycle_index = 0
-            variation_index += 1
-            strength += 0.1  # Increase variation strength each cycle
+            # Generate variation
+            new_rgb = _generate_color_variation(base_color.rgb, var_type, strength)
 
-        # Safety: prevent infinite loop
-        if variation_index > 10:
-            break
+            # Check if this color is too similar to existing ones
+            is_unique = True
+            for existing in result:
+                dist = _color_distance_hsl(new_rgb, existing.rgb)
+                if dist < 0.08:  # Too similar
+                    is_unique = False
+                    break
+
+            if is_unique:
+                new_color = ColorInfo.from_rgb(
+                    new_rgb[0], new_rgb[1], new_rgb[2],
+                    base_color.percentage * 0.5,
+                    index=len(result) + 1,
+                )
+                result.append(new_color)
+                slots_to_fill -= 1
+
+            color_cycle_index += 1
+            if color_cycle_index >= len(base_colors):
+                color_cycle_index = 0
+                variation_index += 1
+                strength += 0.08
 
     return result
 
@@ -1379,14 +1466,9 @@ class PaletteExtractor:
         else:
             sample_pixels = pixels
 
-        # For diverse/saturated methods, extract many more clusters to find variety
-        if self.settings.palette_method in (PaletteMethod.DIVERSE, PaletteMethod.SATURATED):
-            # Extract 3-4x more colors to have good candidates for diversity selection
-            total_clusters = min(48, max(24, self.settings.num_colors * 4))
-        else:
-            # Standard method: just a few extra
-            extra_clusters = min(6, self.settings.num_colors)
-            total_clusters = self.settings.num_colors + extra_clusters
+        # ALWAYS use same number of clusters for consistent analysis
+        # Methods only SELECT from analyzed colors - analysis must be identical!
+        total_clusters = 48  # Fine-grained analysis for all methods
 
         # Perform K-Means clustering
         self._kmeans = KMeans(
@@ -1809,19 +1891,53 @@ class PaletteExtractor:
         # =====================================================================
         # FILL MISSING SLOTS: Ensure all requested colors are provided
         # =====================================================================
+        self._log(f"\n--- SLOT-BEFÜLLUNG ---")
+        self._log(f"Aktuelle Anzahl: {len(colors)}, Ziel: {self.settings.num_colors}")
+
         if len(colors) < self.settings.num_colors:
             # First try: use remaining chromatic colors
             remaining = [c for c in all_colors if c not in colors]
             remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-            colors.extend(remaining[: self.settings.num_colors - len(colors)])
+            added_from_remaining = remaining[: self.settings.num_colors - len(colors)]
+            if added_from_remaining:
+                self._log(f"Hinzugefügt aus verbleibenden Farben:")
+                for c in added_from_remaining:
+                    fam = _get_color_family(c.rgb)
+                    self._log(f"  + {c.name} ({fam})")
+            colors.extend(added_from_remaining)
 
         # Second: if still missing, generate method-appropriate variations
         if len(colors) < self.settings.num_colors:
+            self._log(f"\nGeneriere Variationen ({len(colors)} → {self.settings.num_colors})...")
+
+            # Calculate target distribution
+            family_counts_before = {}
+            for c in colors:
+                fam = _get_color_family(c.rgb)
+                if fam not in ("gray", "extreme"):
+                    family_counts_before[fam] = family_counts_before.get(fam, 0) + 1
+
+            target_slots = _calculate_balanced_slot_distribution(
+                family_counts_before, self.settings.num_colors
+            )
+            self._log(f"Ziel-Verteilung (max 2:1 Ratio): {target_slots}")
+
             colors = _fill_missing_colors(
                 colors,
                 self.settings.num_colors,
                 self.settings.palette_method,
             )
+
+        # Log final distribution
+        self._log(f"\n--- FINALE PALETTE ({len(colors)} Farben) ---")
+        final_family_counts = {}
+        for c in colors:
+            fam = _get_color_family(c.rgb)
+            final_family_counts[fam] = final_family_counts.get(fam, 0) + 1
+        self._log(f"Finale Familien-Verteilung: {final_family_counts}")
+        for i, c in enumerate(colors):
+            fam = _get_color_family(c.rgb)
+            self._log(f"  Slot {i+1}: {c.name} ({fam})")
 
         # =====================================================================
         # GRAY AVOIDANCE: Replace any remaining gray-named colors
