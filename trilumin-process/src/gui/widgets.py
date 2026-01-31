@@ -441,7 +441,6 @@ class SettingsPanel(QWidget):
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
 
         self._palette_method_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
-        self._sort_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
         self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._outline_source_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
 
@@ -553,10 +552,6 @@ class SettingsPanel(QWidget):
         palette_method_index = settings.value("palette_method", 0, type=int)
         self._palette_method_combo.setCurrentIndex(palette_method_index)
 
-        # Load sort method
-        sort_index = settings.value("sort_method", 0, type=int)
-        self._sort_combo.setCurrentIndex(sort_index)
-
         # Load add numbers
         self._add_numbers_checkbox.setChecked(
             settings.value("add_numbers", True, type=bool)
@@ -591,7 +586,6 @@ class SettingsPanel(QWidget):
         settings.setValue("steps", self._steps_spinbox.value())
         settings.setValue("edge_sensitivity", self._edge_slider.value())
         settings.setValue("palette_method", self._palette_method_combo.currentIndex())
-        settings.setValue("sort_method", self._sort_combo.currentIndex())
         settings.setValue("add_numbers", self._add_numbers_checkbox.isChecked())
         settings.setValue("outline_source", self._outline_source_combo.currentIndex())
         settings.setValue("min_contour_length", self._min_length_slider.value())
