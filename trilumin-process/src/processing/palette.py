@@ -1095,17 +1095,25 @@ class PaletteExtractor:
             end = min(start + chunk_size, num_pixels)
             chunk = pixels[start:end]
 
-            # First: handle extreme lightness pixels (L>95% or L<5%)
-            # These belong to shades layer - map to pure white/black
-            # Lightness = (max + min) / 2 in 0-255 range
-            # L > 95% means (max + min) / 510 > 0.95, i.e. max + min > 484
-            # L < 5% means (max + min) / 510 < 0.05, i.e. max + min < 26
+            # Analyze pixel properties for special handling
             max_vals = np.max(chunk, axis=1)
             min_vals = np.min(chunk, axis=1)
             lightness_sum = max_vals + min_vals
+            color_range = max_vals - min_vals
 
-            is_almost_white = lightness_sum > 484  # L > 95%
-            is_almost_black = lightness_sum < 26   # L < 5%
+            # 1. Extreme lightness (L>95% or L<5%) → pure white/black (shades layer)
+            # L > 95% means (max + min) / 510 > 0.95, i.e. max + min > 484
+            # L < 5% means (max + min) / 510 < 0.05, i.e. max + min < 26
+            is_almost_white = lightness_sum > 484
+            is_almost_black = lightness_sum < 26
+
+            # 2. Gray pixels (low saturation) → keep as gray (shades layer)
+            # Saturation is ~0 when max - min is small
+            # Threshold ~25-30 corresponds to roughly S < 10-12%
+            is_gray = color_range < 28
+
+            # Calculate gray values for gray pixels (lightness as grayscale)
+            gray_values = (lightness_sum / 2).astype(np.uint8)
 
             # Calculate squared Euclidean distance to each palette color
             # Shape: (chunk_size, num_palette_colors)
@@ -1118,7 +1126,15 @@ class PaletteExtractor:
             nearest_indices = np.argmin(distances, axis=1)
             chunk_posterized = self._palette_colors[nearest_indices]
 
-            # Override extreme lightness pixels with pure white/black
+            # Override special pixels:
+            # Gray pixels → their grayscale value (NOT a palette color!)
+            # This is key: gray areas belong to shades layer, not color palette
+            gray_mask = is_gray & ~is_almost_white & ~is_almost_black
+            chunk_posterized[gray_mask, 0] = gray_values[gray_mask]
+            chunk_posterized[gray_mask, 1] = gray_values[gray_mask]
+            chunk_posterized[gray_mask, 2] = gray_values[gray_mask]
+
+            # Extreme lightness → pure white/black
             chunk_posterized[is_almost_white] = [255, 255, 255]
             chunk_posterized[is_almost_black] = [0, 0, 0]
 
