@@ -1325,6 +1325,15 @@ class PaletteExtractor:
         self._labels: Optional[np.ndarray] = None
         self._color_to_index: Dict[Tuple[int, int, int], int] = {}
         self._palette_colors: Optional[np.ndarray] = None  # Selected palette RGB values
+        self._debug_log: List[str] = []  # Debug logging for analysis
+
+    def _log(self, message: str) -> None:
+        """Add a message to the debug log."""
+        self._debug_log.append(message)
+
+    def get_debug_log(self) -> str:
+        """Get the complete debug log as a string."""
+        return "\n".join(self._debug_log)
 
     def _validate_settings(self) -> None:
         """Ensure settings are within valid range."""
@@ -1439,6 +1448,35 @@ class PaletteExtractor:
         present_families = list(family_stats.keys())
         num_families = len(present_families)
 
+        # Clear and start debug log
+        self._debug_log = []
+        self._log("=" * 60)
+        self._log("FARBANALYSE DEBUG LOG")
+        self._log("=" * 60)
+        self._log(f"\nMethode: {self.settings.palette_method.value}")
+        self._log(f"Zielanzahl Farben: {self.settings.num_colors}")
+        self._log(f"\n--- K-MEANS CLUSTERING ---")
+        self._log(f"Cluster extrahiert: {len(all_cluster_colors)}")
+        self._log(f"Alle Farben (nach Filter): {len(all_colors)}")
+        self._log(f"Chromatische Farben: {len(chromatic_colors)}")
+
+        self._log(f"\n--- FARBFAMILIEN IM BILD ---")
+        self._log(f"Anzahl Familien gefunden: {num_families}")
+        for fam in present_families:
+            stats = family_stats[fam]
+            self._log(f"  {fam.upper()}: {len(stats['colors'])} Farben, "
+                     f"Fläche: {stats['area']:.1f}%, "
+                     f"Max Sättigung: {stats['max_saturation']:.0f}%, "
+                     f"Anchor: {stats['anchor'].name if stats['anchor'] else 'None'}")
+
+        # Log each chromatic color with its family classification
+        self._log(f"\n--- ALLE CHROMATISCHEN FARBEN ({len(chromatic_colors)}) ---")
+        for c in chromatic_colors:
+            h, s, l = _get_hsl(c.rgb)
+            fam = _get_color_family(c.rgb)
+            self._log(f"  {c.name}: RGB{c.rgb}, HSL({h:.0f}°, {s:.0f}%, {l:.0f}%), "
+                     f"Familie={fam}, Fläche={c.percentage:.1f}%")
+
         # =====================================================================
         # METHOD-SPECIFIC COLOR SELECTION
         # All methods: First fill one color per family, then add more by method
@@ -1446,6 +1484,7 @@ class PaletteExtractor:
 
         colors = []
         num_colors = self.settings.num_colors
+        self._log(f"\n--- FARBAUSWAHL STARTET ---")
 
         if self.settings.palette_method == PaletteMethod.STANDARD:
             # -----------------------------------------------------------------
@@ -1535,9 +1574,15 @@ class PaletteExtractor:
             # Complementary pairs scored by combined dominance
             # CRITICAL: Track family counts and enforce 2:1 max ratio DURING fill
             # -----------------------------------------------------------------
+            self._log(f"\n--- INTENSIFY METHODE ---")
             pair_scores = _get_complementary_pair_scores(family_stats)
             used_families = set()
             family_slot_counts = {}  # Track how many slots each family has
+
+            self._log(f"Komplementärpaare (nach Score sortiert):")
+            for f1, f2, score, a1, a2 in pair_scores:
+                self._log(f"  {f1} ↔ {f2}: Score={score:.1f}, "
+                         f"Anchors: {a1.name if a1 else 'None'} / {a2.name if a2 else 'None'}")
 
             def can_add_family(fam: str) -> bool:
                 """Check if we can add another color from this family (2:1 rule)."""
@@ -1552,14 +1597,19 @@ class PaletteExtractor:
                 # Can add if it won't exceed 2:1 ratio
                 return (current_count + 1) <= min_other * 2
 
-            def add_color(c: "ColorInfo", fam: str) -> bool:
+            def add_color(c: "ColorInfo", fam: str, reason: str = "") -> bool:
                 """Add color if family balance allows."""
-                if not can_add_family(fam):
+                can_add = can_add_family(fam)
+                if not can_add:
+                    self._log(f"  BLOCKIERT: {c.name} ({fam}) - 2:1 Regel verletzt! "
+                             f"Counts: {dict(family_slot_counts)}")
                     return False
                 colors.append(c)
                 family_slot_counts[fam] = family_slot_counts.get(fam, 0) + 1
+                self._log(f"  + Slot {len(colors)}: {c.name} ({fam}) {reason}")
                 return True
 
+            self._log(f"\nPhase 1: Fülle aus Komplementärpaaren...")
             # Fill slots from complementary pairs (lighter color first in each pair)
             for f1, f2, score, anchor1, anchor2 in pair_scores:
                 if len(colors) >= num_colors:
@@ -1567,29 +1617,33 @@ class PaletteExtractor:
 
                 # Add lighter color of pair first
                 if f1 not in used_families and len(colors) < num_colors:
-                    if add_color(anchor1, f1):
+                    if add_color(anchor1, f1, f"[Paar {f1}↔{f2}, heller]"):
                         used_families.add(f1)
 
                 # Then add the complementary color
                 if f2 not in used_families and len(colors) < num_colors:
-                    if add_color(anchor2, f2):
+                    if add_color(anchor2, f2, f"[Paar {f1}↔{f2}, dunkler]"):
                         used_families.add(f2)
 
+            self._log(f"\nPhase 2: Fülle verbleibende Familien...")
             # Fill remaining families not in pairs
             for family in present_families:
                 if len(colors) >= num_colors:
                     break
                 if family not in used_families:
-                    if add_color(family_stats[family]['anchor'], family):
+                    if add_color(family_stats[family]['anchor'], family, "[nicht in Paar]"):
                         used_families.add(family)
 
+            self._log(f"\nPhase 3: Fülle restliche Slots fair verteilt...")
+            self._log(f"  Bisherige Counts: {dict(family_slot_counts)}")
             # Fill remaining slots - cycle through ALL families fairly
             # Sort families by current count (least filled first)
             if len(colors) < num_colors:
                 max_passes = 5  # Safety limit
-                for _ in range(max_passes):
+                for pass_num in range(max_passes):
                     if len(colors) >= num_colors:
                         break
+                    self._log(f"  Pass {pass_num + 1}:")
                     # Get families sorted by slot count (ascending)
                     sorted_by_count = sorted(
                         present_families,
@@ -1728,9 +1782,29 @@ class PaletteExtractor:
         # POST-PROCESSING: Balance family distribution
         # If one family has 3x more colors than next, cluster and redistribute
         # =====================================================================
+        self._log(f"\n--- VOR BALANCIERUNG ---")
+        pre_balance_counts = {}
+        for c in colors:
+            fam = _get_color_family(c.rgb)
+            pre_balance_counts[fam] = pre_balance_counts.get(fam, 0) + 1
+        self._log(f"Familien-Verteilung: {pre_balance_counts}")
+        for i, c in enumerate(colors):
+            fam = _get_color_family(c.rgb)
+            self._log(f"  Slot {i+1}: {c.name} ({fam})")
+
         colors = _balance_family_distribution(
             colors, family_stats, self.settings.palette_method, chromatic_colors
         )
+
+        self._log(f"\n--- NACH BALANCIERUNG ---")
+        post_balance_counts = {}
+        for c in colors:
+            fam = _get_color_family(c.rgb)
+            post_balance_counts[fam] = post_balance_counts.get(fam, 0) + 1
+        self._log(f"Familien-Verteilung: {post_balance_counts}")
+        for i, c in enumerate(colors):
+            fam = _get_color_family(c.rgb)
+            self._log(f"  Slot {i+1}: {c.name} ({fam})")
 
         # =====================================================================
         # FILL MISSING SLOTS: Ensure all requested colors are provided

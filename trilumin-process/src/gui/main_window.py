@@ -16,7 +16,11 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QProgressBar,
+    QDialog,
+    QTextEdit,
+    QLabel,
 )
+from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from gui.widgets import (
@@ -31,6 +35,35 @@ from processing.shades import ShadeQuantizer
 from processing.palette import PaletteExtractor, PaletteSettings, SortMethod, PaletteMethod
 from processing.abstraction import ImageAbstractor, AbstractionSettings, apply_color_boost
 from utils.image_io import ImageIO
+
+
+class DebugDialog(QDialog):
+    """Dialog to display palette analysis debug information."""
+
+    def __init__(self, debug_text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Farbanalyse Debug")
+        self.setMinimumSize(800, 600)
+        self.resize(900, 700)
+
+        layout = QVBoxLayout(self)
+
+        # Title
+        title = QLabel("Farbanalyse - Debug Informationen")
+        title.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+
+        # Text area with monospace font
+        self._text_edit = QTextEdit()
+        self._text_edit.setReadOnly(True)
+        self._text_edit.setFont(QFont("Courier New", 10))
+        self._text_edit.setPlainText(debug_text)
+        layout.addWidget(self._text_edit)
+
+        # Close button
+        close_btn = QPushButton("Schließen")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 @dataclass
@@ -111,6 +144,8 @@ class ProcessingWorker(QThread):
                     palette_source_image = apply_color_boost(self.image)
 
             results["colors"] = palette_extractor.extract_palette(palette_source_image)
+            # Store debug log from palette extraction
+            results["debug_log"] = palette_extractor.get_debug_log()
             # Use working_image for posterization (shows abstraction effect)
             results["posterized"] = palette_extractor.create_posterized_image(
                 working_image, add_numbers=opts.add_numbers
@@ -225,6 +260,7 @@ class MainWindow(QMainWindow):
         self._saved_display_index: int = 0
         self._is_new_image_load: bool = False
         self._settings_changed_since_process: bool = False
+        self._debug_log: str = ""  # Store debug log from palette extraction
 
         self._setup_ui()
         self._connect_signals()
@@ -260,6 +296,13 @@ class MainWindow(QMainWindow):
             "Composite: Überlagerung von Shades und Colors"
         )
         toolbar_layout.addWidget(self._display_combo)
+
+        # Debug button
+        self._debug_button = QPushButton("[debug]")
+        self._debug_button.setMaximumWidth(60)
+        self._debug_button.setEnabled(False)
+        self._debug_button.setToolTip("Zeigt detaillierte Farbanalyse-Informationen")
+        toolbar_layout.addWidget(self._debug_button)
 
         toolbar_layout.addStretch()
 
@@ -348,6 +391,7 @@ class MainWindow(QMainWindow):
         self._update_button.clicked.connect(self._process_image)
         self._save_all_button.clicked.connect(self._save_all)
         self._display_combo.currentIndexChanged.connect(self._on_display_changed)
+        self._debug_button.clicked.connect(self._show_debug_dialog)
 
         self._outlines_panel.save_requested.connect(self._save_result)
         self._shades_panel.save_requested.connect(self._save_result)
@@ -357,6 +401,19 @@ class MainWindow(QMainWindow):
         # Settings changed signals
         self._settings_panel.settings_changed.connect(self._on_settings_changed)
         self._abstraction_panel.settings_changed.connect(self._on_settings_changed)
+
+    def _show_debug_dialog(self) -> None:
+        """Show the debug dialog with palette analysis information."""
+        if self._debug_log:
+            dialog = DebugDialog(self._debug_log, self)
+            dialog.exec()
+        else:
+            QMessageBox.information(
+                self,
+                "Debug",
+                "Keine Debug-Informationen verfügbar.\n"
+                "Bitte zuerst ein Bild verarbeiten."
+            )
 
     def _on_settings_changed(self) -> None:
         """Handle settings changes."""
@@ -477,6 +534,10 @@ class MainWindow(QMainWindow):
     def _on_processing_finished(self, results: dict) -> None:
         self._results = results
         self._settings_changed_since_process = False
+
+        # Store debug log and enable debug button
+        self._debug_log = results.get("debug_log", "")
+        self._debug_button.setEnabled(bool(self._debug_log))
 
         # Store abstracted image if available
         if results.get("abstracted") is not None:
