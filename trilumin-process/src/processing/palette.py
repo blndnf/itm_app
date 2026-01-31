@@ -893,12 +893,13 @@ class PaletteExtractor:
             if _is_pure_black_white_gray(r, g, b):
                 continue
 
-            # Filter out extreme lightness (L>95% or L<5%) - these belong to shades layer
-            if _is_extreme_lightness(r, g, b):
-                continue
-
             color_info = ColorInfo.from_rgb(r, g, b, round(pct, 2), index=i + 1)
             all_colors.append(color_info)
+
+            # Skip extreme lightness for chromatic pools (shades layer handles these)
+            # BUT keep them in all_colors for fallback/posterization
+            if _is_extreme_lightness(r, g, b):
+                continue
 
             # Track chromatic colors (good saturation, valid name - NOT gray/white/black)
             # Standard threshold for most methods
@@ -1094,6 +1095,18 @@ class PaletteExtractor:
             end = min(start + chunk_size, num_pixels)
             chunk = pixels[start:end]
 
+            # First: handle extreme lightness pixels (L>95% or L<5%)
+            # These belong to shades layer - map to pure white/black
+            # Lightness = (max + min) / 2 in 0-255 range
+            # L > 95% means (max + min) / 510 > 0.95, i.e. max + min > 484
+            # L < 5% means (max + min) / 510 < 0.05, i.e. max + min < 26
+            max_vals = np.max(chunk, axis=1)
+            min_vals = np.min(chunk, axis=1)
+            lightness_sum = max_vals + min_vals
+
+            is_almost_white = lightness_sum > 484  # L > 95%
+            is_almost_black = lightness_sum < 26   # L < 5%
+
             # Calculate squared Euclidean distance to each palette color
             # Shape: (chunk_size, num_palette_colors)
             distances = np.sum(
@@ -1103,7 +1116,13 @@ class PaletteExtractor:
 
             # Find nearest palette color for each pixel
             nearest_indices = np.argmin(distances, axis=1)
-            posterized_pixels[start:end] = self._palette_colors[nearest_indices]
+            chunk_posterized = self._palette_colors[nearest_indices]
+
+            # Override extreme lightness pixels with pure white/black
+            chunk_posterized[is_almost_white] = [255, 255, 255]
+            chunk_posterized[is_almost_black] = [0, 0, 0]
+
+            posterized_pixels[start:end] = chunk_posterized
 
         # Reshape back to image dimensions
         posterized = posterized_pixels.reshape(rgb_image.shape)
