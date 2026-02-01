@@ -1862,47 +1862,101 @@ class PaletteExtractor:
             self._log(f"\nPhase 3: Fülle restliche Slots fair verteilt...")
             self._log(f"  Bisherige Counts: {dict(family_slot_counts)}")
             # Fill remaining slots - cycle through ALL families fairly
-            # Sort families by current count (least filled first)
+            # When 2:1 rule blocks, generate VARIATIONS of underrepresented families
             if len(colors) < num_colors:
-                max_passes = 10  # More passes for larger palettes
-                strict_mode = True  # Start with 2:1 enforcement
+                max_passes = 15
 
                 for pass_num in range(max_passes):
                     if len(colors) >= num_colors:
                         break
-                    self._log(f"  Pass {pass_num + 1} {'(strict)' if strict_mode else '(relaxed)'}:")
-                    # Get families sorted by slot count (ascending)
+                    self._log(f"  Pass {pass_num + 1}:")
+                    # Get families sorted by slot count (ascending - least filled first)
                     sorted_by_count = sorted(
                         present_families,
                         key=lambda f: family_slot_counts.get(f, 0)
                     )
                     added_any = False
+
                     for family in sorted_by_count:
                         if len(colors) >= num_colors:
                             break
-                        # In strict mode, check 2:1 rule; in relaxed mode, skip check
-                        if strict_mode and not can_add_family(family):
+                        if not can_add_family(family):
                             continue
-                        # Find next unused color from this family
+
+                        # Try to find an unused color from this family
                         family_colors_sorted = sorted(
                             family_stats[family]['colors'],
                             key=lambda c: _get_color_saturation(*c.rgb) * _get_color_lightness(*c.rgb),
                             reverse=True
                         )
+                        found_color = False
                         for c in family_colors_sorted:
                             if c not in colors:
                                 colors.append(c)
                                 family_slot_counts[family] = family_slot_counts.get(family, 0) + 1
                                 self._log(f"    + Slot {len(colors)}: {c.name} ({family})")
                                 added_any = True
+                                found_color = True
                                 break
+
+                        # If no unused color available, generate a variation
+                        if not found_color:
+                            base_colors = [c for c in colors if _get_color_family(c.rgb) == family]
+                            if base_colors:
+                                base = base_colors[-1]
+                                for var_type in ["lighter", "darker", "saturated"]:
+                                    var_rgb = _generate_color_variation(base.rgb, var_type, 0.2 + pass_num * 0.05)
+                                    is_unique = all(
+                                        _color_distance_hsl(var_rgb, c.rgb) >= 0.07
+                                        for c in colors
+                                    )
+                                    if is_unique:
+                                        new_color = ColorInfo.from_rgb(
+                                            var_rgb[0], var_rgb[1], var_rgb[2],
+                                            base.percentage * 0.5,
+                                            len(colors) + 1
+                                        )
+                                        colors.append(new_color)
+                                        family_slot_counts[family] = family_slot_counts.get(family, 0) + 1
+                                        self._log(f"    + Slot {len(colors)}: {new_color.name} ({family}) [Var. von {base.name}]")
+                                        added_any = True
+                                        break
+
+                    # If 2:1 blocks all AND no variations were added, generate for lowest-count families
                     if not added_any:
-                        if strict_mode:
-                            # Relax the 2:1 rule to fill remaining slots
-                            self._log(f"  2:1 Regel blockiert alle - wechsle zu relaxed mode")
-                            strict_mode = False
-                        else:
-                            break  # Truly no more colors available
+                        self._log(f"    Alle blockiert - generiere Variationen für min-count Familien...")
+                        min_count = min(family_slot_counts.values()) if family_slot_counts else 0
+                        for family in sorted_by_count:
+                            if len(colors) >= num_colors:
+                                break
+                            current = family_slot_counts.get(family, 0)
+                            if current > min_count:
+                                continue  # Only add to families with minimum count
+                            base_colors = [c for c in colors if _get_color_family(c.rgb) == family]
+                            if base_colors:
+                                base = base_colors[-1]
+                                for var_type, strength in [("lighter", 0.25), ("darker", 0.25), ("saturated", 0.3)]:
+                                    var_rgb = _generate_color_variation(base.rgb, var_type, strength)
+                                    is_unique = all(
+                                        _color_distance_hsl(var_rgb, c.rgb) >= 0.05
+                                        for c in colors
+                                    )
+                                    if is_unique:
+                                        new_color = ColorInfo.from_rgb(
+                                            var_rgb[0], var_rgb[1], var_rgb[2],
+                                            base.percentage * 0.5,
+                                            len(colors) + 1
+                                        )
+                                        colors.append(new_color)
+                                        family_slot_counts[family] = family_slot_counts.get(family, 0) + 1
+                                        self._log(f"    + Slot {len(colors)}: {new_color.name} ({family}) [Var. {var_type}]")
+                                        added_any = True
+                                        break
+                            if added_any:
+                                break
+                        if not added_any:
+                            self._log(f"    Keine weiteren Variationen möglich")
+                            break
 
         elif self.settings.palette_method == PaletteMethod.DIVERSE:
             # -----------------------------------------------------------------
