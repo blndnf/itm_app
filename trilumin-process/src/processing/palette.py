@@ -643,6 +643,149 @@ def _balance_family_distribution(
     return result
 
 
+def _final_balance_palette(
+    colors: List["ColorInfo"],
+    family_stats: Dict[str, Dict],
+    chromatic_colors: List["ColorInfo"],
+    log_func=None
+) -> List["ColorInfo"]:
+    """
+    Final balance enforcement on completed palette.
+
+    Uses CASCADING approach:
+    1. Find most imbalanced pair (e.g., B:O = 8:1)
+    2. Cluster 2 from dominant family, add 1 from underrepresented
+    3. Check if this creates new imbalance (cascade)
+    4. Repeat until all pairs are ≤ 2:1
+
+    Args:
+        colors: List of colors in palette (all slots filled).
+        family_stats: Statistics about families in image.
+        chromatic_colors: All available chromatic colors.
+        log_func: Optional logging function.
+
+    Returns:
+        Balanced list of colors.
+    """
+    if len(colors) < 3:
+        return colors
+
+    def log(msg):
+        if log_func:
+            log_func(msg)
+
+    result = list(colors)
+    max_iterations = 20
+
+    for iteration in range(max_iterations):
+        # Count colors per family
+        family_counts = {}
+        family_colors_in_result = {}
+        for i, c in enumerate(result):
+            fam = _get_color_family(c.rgb)
+            if fam not in ("gray", "extreme"):
+                family_counts[fam] = family_counts.get(fam, 0) + 1
+                if fam not in family_colors_in_result:
+                    family_colors_in_result[fam] = []
+                family_colors_in_result[fam].append((i, c))
+
+        if len(family_counts) < 2:
+            break
+
+        # Find most imbalanced pair
+        sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
+
+        # Find pair with worst ratio
+        worst_ratio = 0
+        dominant_fam = None
+        under_fam = None
+
+        for i, (fam_i, count_i) in enumerate(sorted_families):
+            for j in range(i + 1, len(sorted_families)):
+                fam_j, count_j = sorted_families[j]
+                if count_j > 0:
+                    ratio = count_i / count_j
+                    if ratio > worst_ratio:
+                        worst_ratio = ratio
+                        dominant_fam = fam_i
+                        under_fam = fam_j
+
+        # Check if ratio exceeds 2:1
+        if worst_ratio <= 2.0:
+            log(f"  Alle Verhältnisse ≤ 2:1, Balancierung abgeschlossen.")
+            break
+
+        log(f"  Iteration {iteration + 1}: {dominant_fam}:{under_fam} = "
+            f"{family_counts[dominant_fam]}:{family_counts[under_fam]} "
+            f"(Ratio: {worst_ratio:.1f}:1)")
+
+        # Get colors from dominant family, sorted by saturation (lowest first)
+        dom_colors = family_colors_in_result.get(dominant_fam, [])
+        if len(dom_colors) < 2:
+            log(f"    Kann nicht clustern - zu wenig Farben in {dominant_fam}")
+            break
+
+        dom_colors.sort(key=lambda x: _get_color_saturation(*x[1].rgb))
+
+        # Cluster (merge) 2 lowest saturation colors from dominant family
+        idx1, color1 = dom_colors[0]
+        idx2, color2 = dom_colors[1]
+
+        blended_rgb = _blend_colors(color1, color2)
+        blended_color = ColorInfo.from_rgb(
+            blended_rgb[0], blended_rgb[1], blended_rgb[2],
+            (color1.percentage + color2.percentage) / 2,
+            color1.index
+        )
+
+        # Find replacement from underrepresented family
+        replacement = None
+
+        # Try from family_stats first
+        if under_fam in family_stats:
+            candidates = sorted(
+                family_stats[under_fam]['colors'],
+                key=lambda c: _get_color_saturation(*c.rgb),
+                reverse=True
+            )
+            for cand in candidates:
+                if cand not in result:
+                    replacement = cand
+                    break
+
+        # If not found, try generating a variation
+        if not replacement:
+            under_colors = [c for c in result if _get_color_family(c.rgb) == under_fam]
+            if under_colors:
+                base = under_colors[0]
+                # Generate a variation
+                var_rgb = _generate_color_variation(base.rgb, "lighter", 0.2)
+                # Check it's different enough
+                is_unique = all(
+                    _color_distance_hsl(var_rgb, c.rgb) >= 0.08
+                    for c in result
+                )
+                if is_unique:
+                    replacement = ColorInfo.from_rgb(
+                        var_rgb[0], var_rgb[1], var_rgb[2],
+                        base.percentage * 0.5,
+                        len(result)
+                    )
+
+        if replacement:
+            # Apply changes
+            result[idx1] = blended_color
+            result[idx2] = replacement
+            log(f"    Clustered: {color1.name} + {color2.name} → {blended_color.name}")
+            log(f"    Added: {replacement.name} ({under_fam})")
+        else:
+            log(f"    Kein Ersatz für {under_fam} gefunden, überspringe...")
+            # Mark this pair as tried to avoid infinite loop
+            break
+
+    return result
+
+
 def _get_color_family(rgb: Tuple[int, int, int], for_glow: bool = False) -> str:
     """
     Get the color family for a color (7 artist families).
@@ -1890,43 +2033,79 @@ class PaletteExtractor:
 
         # =====================================================================
         # FILL MISSING SLOTS: Ensure all requested colors are provided
+        # CRITICAL: Must respect 2:1 max ratio between families!
         # =====================================================================
         self._log(f"\n--- SLOT-BEFÜLLUNG ---")
         self._log(f"Aktuelle Anzahl: {len(colors)}, Ziel: {self.settings.num_colors}")
 
-        if len(colors) < self.settings.num_colors:
-            # First try: use remaining chromatic colors
-            remaining = [c for c in all_colors if c not in colors]
-            remaining.sort(key=lambda c: _get_color_saturation(*c.rgb), reverse=True)
-            added_from_remaining = remaining[: self.settings.num_colors - len(colors)]
-            if added_from_remaining:
-                self._log(f"Hinzugefügt aus verbleibenden Farben:")
-                for c in added_from_remaining:
-                    fam = _get_color_family(c.rgb)
-                    self._log(f"  + {c.name} ({fam})")
-            colors.extend(added_from_remaining)
+        # Calculate current family counts
+        current_family_counts = {}
+        for c in colors:
+            fam = _get_color_family(c.rgb)
+            if fam not in ("gray", "extreme"):
+                current_family_counts[fam] = current_family_counts.get(fam, 0) + 1
 
-        # Second: if still missing, generate method-appropriate variations
-        if len(colors) < self.settings.num_colors:
-            self._log(f"\nGeneriere Variationen ({len(colors)} → {self.settings.num_colors})...")
+        # Calculate target distribution respecting 2:1 ratio
+        target_slots = _calculate_balanced_slot_distribution(
+            current_family_counts, self.settings.num_colors
+        )
+        self._log(f"Ziel-Verteilung (max 2:1 Ratio): {target_slots}")
 
-            # Calculate target distribution
-            family_counts_before = {}
-            for c in colors:
+        # Group remaining colors by family
+        remaining_by_family: Dict[str, List[ColorInfo]] = {}
+        for c in all_colors:
+            if c not in colors:
                 fam = _get_color_family(c.rgb)
                 if fam not in ("gray", "extreme"):
-                    family_counts_before[fam] = family_counts_before.get(fam, 0) + 1
+                    if fam not in remaining_by_family:
+                        remaining_by_family[fam] = []
+                    remaining_by_family[fam].append(c)
 
-            target_slots = _calculate_balanced_slot_distribution(
-                family_counts_before, self.settings.num_colors
+        # Sort each family's remaining colors by saturation (most saturated first)
+        for fam in remaining_by_family:
+            remaining_by_family[fam].sort(
+                key=lambda c: _get_color_saturation(*c.rgb), reverse=True
             )
-            self._log(f"Ziel-Verteilung (max 2:1 Ratio): {target_slots}")
 
+        # Fill slots respecting target distribution
+        self._log(f"\nFülle Slots nach Ziel-Verteilung:")
+        while len(colors) < self.settings.num_colors:
+            added_any = False
+
+            # Find family that needs most additional slots
+            for fam, target in sorted(target_slots.items(),
+                                      key=lambda x: x[1] - current_family_counts.get(x[0], 0),
+                                      reverse=True):
+                current = current_family_counts.get(fam, 0)
+                if current < target and fam in remaining_by_family and remaining_by_family[fam]:
+                    # Add next color from this family
+                    next_color = remaining_by_family[fam].pop(0)
+                    colors.append(next_color)
+                    current_family_counts[fam] = current + 1
+                    self._log(f"  + {next_color.name} ({fam}) [Slot {len(colors)}/{self.settings.num_colors}]")
+                    added_any = True
+
+                    if len(colors) >= self.settings.num_colors:
+                        break
+
+            if not added_any:
+                break  # No more colors to add from remaining
+
+        # If still missing, generate variations (respecting ratios)
+        if len(colors) < self.settings.num_colors:
+            self._log(f"\nGeneriere Variationen ({len(colors)} → {self.settings.num_colors})...")
             colors = _fill_missing_colors(
                 colors,
                 self.settings.num_colors,
                 self.settings.palette_method,
             )
+
+        # =====================================================================
+        # FINAL BALANCE CHECK: Enforce 2:1 ratio on completed palette
+        # Uses cascading approach: balance most imbalanced pair first
+        # =====================================================================
+        self._log(f"\n--- FINALE BALANCIERUNG ---")
+        colors = _final_balance_palette(colors, family_stats, chromatic_colors, self._log)
 
         # Log final distribution
         self._log(f"\n--- FINALE PALETTE ({len(colors)} Farben) ---")

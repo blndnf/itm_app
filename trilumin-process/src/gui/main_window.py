@@ -19,9 +19,17 @@ from PyQt6.QtWidgets import (
     QDialog,
     QTextEdit,
     QLabel,
+    QTabWidget,
+    QComboBox,
+    QSpinBox,
+    QDoubleSpinBox,
+    QCheckBox,
+    QGroupBox,
+    QFormLayout,
+    QDialogButtonBox,
 )
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
 
 from gui.widgets import (
     ImagePreview,
@@ -64,6 +72,361 @@ class DebugDialog(QDialog):
         close_btn = QPushButton("Schließen")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
+
+
+class AdvancedSettingsDialog(QDialog):
+    """Dialog for advanced color analysis settings."""
+
+    METHOD_INFO = {
+        "kmeans": ("Mini-Batch K-Means (Default)", "Schneller Clustering-Algorithmus, guter Allrounder"),
+        "median_cut": ("Median Cut", "Deterministisch, gut für gleichmäßige Farbverteilung"),
+        "mean_shift": ("Mean Shift", "Findet Clusteranzahl automatisch, langsamer"),
+        "dbscan": ("DBSCAN", "Dichtebasiert, erkennt Ausreißer als Rauschen"),
+        "octree": ("Octree Quantization", "Extrem schnell, für Echtzeit-Vorschau"),
+        "hybrid": ("Hybrid (Octree → K-Means)", "Vorfilterung + Feinanalyse, beste Qualität"),
+        "gmm": ("Gaussian Mixture Model", "Weiche Cluster-Zuordnung, gut für Farbverläufe"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Erweiterte Farbanalyse-Einstellungen")
+        self.setMinimumSize(500, 450)
+
+        self._settings = QSettings("Trilumin", "TrialuminProcess")
+        self._setup_ui()
+        self._load_settings()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Tab widget
+        self._tabs = QTabWidget()
+        layout.addWidget(self._tabs)
+
+        # Tab 1: Method Selection
+        method_tab = QWidget()
+        method_layout = QVBoxLayout(method_tab)
+
+        method_group = QGroupBox("Clustering-Methode")
+        method_form = QFormLayout(method_group)
+
+        self._method_combo = QComboBox()
+        for method_id, (name, tooltip) in self.METHOD_INFO.items():
+            self._method_combo.addItem(name, method_id)
+            idx = self._method_combo.count() - 1
+            self._method_combo.setItemData(idx, tooltip, Qt.ItemDataRole.ToolTipRole)
+
+        method_form.addRow("Methode:", self._method_combo)
+
+        self._method_description = QLabel()
+        self._method_description.setWordWrap(True)
+        self._method_description.setStyleSheet("color: #666; font-style: italic;")
+        method_form.addRow(self._method_description)
+
+        method_layout.addWidget(method_group)
+
+        # Cascading vs Sequential toggle
+        balance_group = QGroupBox("Balancierungs-Modus")
+        balance_layout = QVBoxLayout(balance_group)
+
+        self._cascading_check = QCheckBox("Cascading Balancing (Standard)")
+        self._cascading_check.setToolTip(
+            "Durchkaskadieren: Nach dem Balancieren einer Familie "
+            "wird geprüft ob dadurch neue Ungleichgewichte entstanden sind.\n"
+            "Sequential: Erst eine Familie vollständig balancieren, dann die nächste."
+        )
+        self._cascading_check.setChecked(True)
+        balance_layout.addWidget(self._cascading_check)
+
+        method_layout.addWidget(balance_group)
+        method_layout.addStretch()
+
+        self._tabs.addTab(method_tab, "Methodenauswahl")
+
+        # Tab 2: Method Parameters
+        params_tab = QWidget()
+        params_layout = QVBoxLayout(params_tab)
+
+        # K-Means parameters
+        self._kmeans_group = QGroupBox("K-Means Parameter")
+        kmeans_form = QFormLayout(self._kmeans_group)
+
+        self._kmeans_batch = QSpinBox()
+        self._kmeans_batch.setRange(100, 10000)
+        self._kmeans_batch.setValue(1024)
+        kmeans_form.addRow("Batch Size:", self._kmeans_batch)
+
+        self._kmeans_iter = QSpinBox()
+        self._kmeans_iter.setRange(10, 500)
+        self._kmeans_iter.setValue(100)
+        kmeans_form.addRow("Max Iterations:", self._kmeans_iter)
+
+        self._use_fixed_seed = QCheckBox("Festen Seed verwenden")
+        self._use_fixed_seed.setChecked(True)
+        kmeans_form.addRow(self._use_fixed_seed)
+
+        self._random_seed = QSpinBox()
+        self._random_seed.setRange(0, 9999)
+        self._random_seed.setValue(42)
+        kmeans_form.addRow("Random Seed:", self._random_seed)
+
+        params_layout.addWidget(self._kmeans_group)
+
+        # Mean Shift parameters
+        self._meanshift_group = QGroupBox("Mean Shift Parameter")
+        ms_form = QFormLayout(self._meanshift_group)
+
+        self._ms_auto_bandwidth = QCheckBox("Bandwidth automatisch schätzen")
+        self._ms_auto_bandwidth.setChecked(True)
+        ms_form.addRow(self._ms_auto_bandwidth)
+
+        self._ms_bandwidth = QDoubleSpinBox()
+        self._ms_bandwidth.setRange(0.1, 50.0)
+        self._ms_bandwidth.setValue(30.0)
+        self._ms_bandwidth.setEnabled(False)
+        ms_form.addRow("Bandwidth:", self._ms_bandwidth)
+
+        self._ms_bin_seeding = QCheckBox("Bin Seeding (schneller)")
+        self._ms_bin_seeding.setChecked(True)
+        ms_form.addRow(self._ms_bin_seeding)
+
+        ms_warning = QLabel("⚠️ Kann bei großen Bildern sehr langsam sein!")
+        ms_warning.setStyleSheet("color: orange;")
+        ms_form.addRow(ms_warning)
+
+        params_layout.addWidget(self._meanshift_group)
+        self._meanshift_group.hide()
+
+        # DBSCAN parameters
+        self._dbscan_group = QGroupBox("DBSCAN Parameter")
+        db_form = QFormLayout(self._dbscan_group)
+
+        self._db_eps = QDoubleSpinBox()
+        self._db_eps.setRange(0.1, 50.0)
+        self._db_eps.setValue(10.0)
+        db_form.addRow("Epsilon (max Abstand):", self._db_eps)
+
+        self._db_min_samples = QSpinBox()
+        self._db_min_samples.setRange(1, 100)
+        self._db_min_samples.setValue(50)
+        db_form.addRow("Min Samples:", self._db_min_samples)
+
+        self._db_colorspace = QComboBox()
+        self._db_colorspace.addItems(["Lab", "RGB"])
+        db_form.addRow("Farbraum:", self._db_colorspace)
+
+        db_info = QLabel("Clusteranzahl wird automatisch bestimmt")
+        db_info.setStyleSheet("color: #666; font-style: italic;")
+        db_form.addRow(db_info)
+
+        params_layout.addWidget(self._dbscan_group)
+        self._dbscan_group.hide()
+
+        # Hybrid parameters
+        self._hybrid_group = QGroupBox("Hybrid Parameter")
+        hy_form = QFormLayout(self._hybrid_group)
+
+        self._hy_prefilter = QSpinBox()
+        self._hy_prefilter.setRange(32, 256)
+        self._hy_prefilter.setValue(128)
+        hy_form.addRow("Octree Vorfilter:", self._hy_prefilter)
+
+        self._hy_final = QSpinBox()
+        self._hy_final.setRange(2, 32)
+        self._hy_final.setValue(12)
+        hy_form.addRow("Finale Cluster:", self._hy_final)
+
+        self._hy_colorspace = QComboBox()
+        self._hy_colorspace.addItems(["Lab", "RGB"])
+        hy_form.addRow("Farbraum (final):", self._hy_colorspace)
+
+        params_layout.addWidget(self._hybrid_group)
+        self._hybrid_group.hide()
+
+        # GMM parameters
+        self._gmm_group = QGroupBox("GMM Parameter")
+        gmm_form = QFormLayout(self._gmm_group)
+
+        self._gmm_cov = QComboBox()
+        self._gmm_cov.addItems(["full", "tied", "diag", "spherical"])
+        gmm_form.addRow("Covariance Type:", self._gmm_cov)
+
+        self._gmm_iter = QSpinBox()
+        self._gmm_iter.setRange(10, 500)
+        self._gmm_iter.setValue(100)
+        gmm_form.addRow("Max Iterations:", self._gmm_iter)
+
+        params_layout.addWidget(self._gmm_group)
+        self._gmm_group.hide()
+
+        # Median Cut / Octree info
+        self._simple_group = QGroupBox("Info")
+        simple_form = QFormLayout(self._simple_group)
+        self._simple_info = QLabel("Verwendet PIL/Pillow Quantize")
+        self._simple_info.setStyleSheet("color: #666;")
+        simple_form.addRow(self._simple_info)
+        params_layout.addWidget(self._simple_group)
+        self._simple_group.hide()
+
+        params_layout.addStretch()
+        self._tabs.addTab(params_tab, "Parameter")
+
+        # Time estimate label
+        self._time_estimate = QLabel("Geschätzte Zeit: ~0.5 sec")
+        self._time_estimate.setStyleSheet("color: #666;")
+        layout.addWidget(self._time_estimate)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        reset_btn = QPushButton("Zurücksetzen")
+        reset_btn.clicked.connect(self._reset_defaults)
+        button_layout.addWidget(reset_btn)
+
+        button_layout.addStretch()
+
+        self._button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._button_box.accepted.connect(self.accept)
+        self._button_box.rejected.connect(self.reject)
+        button_layout.addWidget(self._button_box)
+
+        layout.addLayout(button_layout)
+
+    def _connect_signals(self):
+        self._method_combo.currentIndexChanged.connect(self._on_method_changed)
+        self._ms_auto_bandwidth.toggled.connect(
+            lambda checked: self._ms_bandwidth.setEnabled(not checked)
+        )
+        self._use_fixed_seed.toggled.connect(self._random_seed.setEnabled)
+
+    def _on_method_changed(self, index):
+        method = self._method_combo.currentData()
+        _, description = self.METHOD_INFO.get(method, ("", ""))
+        self._method_description.setText(description)
+
+        # Show/hide parameter groups
+        self._kmeans_group.setVisible(method == "kmeans")
+        self._meanshift_group.setVisible(method == "mean_shift")
+        self._dbscan_group.setVisible(method == "dbscan")
+        self._hybrid_group.setVisible(method == "hybrid")
+        self._gmm_group.setVisible(method == "gmm")
+        self._simple_group.setVisible(method in ("median_cut", "octree"))
+
+        if method == "octree":
+            self._simple_info.setText("Nur RGB-Farbraum, keine Lab-Unterstützung")
+        else:
+            self._simple_info.setText("Verwendet PIL/Pillow Quantize")
+
+    def _load_settings(self):
+        method = self._settings.value("advanced/method", "kmeans")
+        idx = self._method_combo.findData(method)
+        if idx >= 0:
+            self._method_combo.setCurrentIndex(idx)
+
+        self._cascading_check.setChecked(
+            self._settings.value("advanced/cascading", True, type=bool)
+        )
+
+        # K-Means
+        self._kmeans_batch.setValue(
+            self._settings.value("advanced/kmeans/batch_size", 1024, type=int)
+        )
+        self._kmeans_iter.setValue(
+            self._settings.value("advanced/kmeans/max_iter", 100, type=int)
+        )
+        self._use_fixed_seed.setChecked(
+            self._settings.value("advanced/use_fixed_seed", True, type=bool)
+        )
+        self._random_seed.setValue(
+            self._settings.value("advanced/random_seed", 42, type=int)
+        )
+
+        # Mean Shift
+        self._ms_auto_bandwidth.setChecked(
+            self._settings.value("advanced/mean_shift/auto_bandwidth", True, type=bool)
+        )
+        self._ms_bandwidth.setValue(
+            self._settings.value("advanced/mean_shift/bandwidth", 30.0, type=float)
+        )
+
+        # Trigger method change to show correct panels
+        self._on_method_changed(self._method_combo.currentIndex())
+
+    def _save_settings(self):
+        self._settings.setValue("advanced/method", self._method_combo.currentData())
+        self._settings.setValue("advanced/cascading", self._cascading_check.isChecked())
+
+        self._settings.setValue("advanced/kmeans/batch_size", self._kmeans_batch.value())
+        self._settings.setValue("advanced/kmeans/max_iter", self._kmeans_iter.value())
+        self._settings.setValue("advanced/use_fixed_seed", self._use_fixed_seed.isChecked())
+        self._settings.setValue("advanced/random_seed", self._random_seed.value())
+
+        self._settings.setValue("advanced/mean_shift/auto_bandwidth", self._ms_auto_bandwidth.isChecked())
+        self._settings.setValue("advanced/mean_shift/bandwidth", self._ms_bandwidth.value())
+
+        self._settings.setValue("advanced/dbscan/eps", self._db_eps.value())
+        self._settings.setValue("advanced/dbscan/min_samples", self._db_min_samples.value())
+        self._settings.setValue("advanced/dbscan/colorspace", self._db_colorspace.currentText())
+
+        self._settings.setValue("advanced/hybrid/prefilter", self._hy_prefilter.value())
+        self._settings.setValue("advanced/hybrid/final", self._hy_final.value())
+        self._settings.setValue("advanced/hybrid/colorspace", self._hy_colorspace.currentText())
+
+        self._settings.setValue("advanced/gmm/covariance", self._gmm_cov.currentText())
+        self._settings.setValue("advanced/gmm/max_iter", self._gmm_iter.value())
+
+    def _reset_defaults(self):
+        self._method_combo.setCurrentIndex(0)
+        self._cascading_check.setChecked(True)
+        self._kmeans_batch.setValue(1024)
+        self._kmeans_iter.setValue(100)
+        self._use_fixed_seed.setChecked(True)
+        self._random_seed.setValue(42)
+        self._ms_auto_bandwidth.setChecked(True)
+        self._ms_bandwidth.setValue(30.0)
+        self._ms_bin_seeding.setChecked(True)
+        self._db_eps.setValue(10.0)
+        self._db_min_samples.setValue(50)
+        self._db_colorspace.setCurrentIndex(0)
+        self._hy_prefilter.setValue(128)
+        self._hy_final.setValue(12)
+        self._hy_colorspace.setCurrentIndex(0)
+        self._gmm_cov.setCurrentIndex(0)
+        self._gmm_iter.setValue(100)
+
+    def accept(self):
+        self._save_settings()
+        super().accept()
+
+    def get_method(self) -> str:
+        return self._method_combo.currentData()
+
+    def get_cascading_mode(self) -> bool:
+        return self._cascading_check.isChecked()
+
+    def get_parameters(self) -> dict:
+        return {
+            "method": self._method_combo.currentData(),
+            "cascading": self._cascading_check.isChecked(),
+            "kmeans_batch_size": self._kmeans_batch.value(),
+            "kmeans_max_iter": self._kmeans_iter.value(),
+            "use_fixed_seed": self._use_fixed_seed.isChecked(),
+            "random_state": self._random_seed.value() if self._use_fixed_seed.isChecked() else None,
+            "mean_shift_auto_bandwidth": self._ms_auto_bandwidth.isChecked(),
+            "mean_shift_bandwidth": self._ms_bandwidth.value(),
+            "mean_shift_bin_seeding": self._ms_bin_seeding.isChecked(),
+            "dbscan_eps": self._db_eps.value(),
+            "dbscan_min_samples": self._db_min_samples.value(),
+            "dbscan_colorspace": self._db_colorspace.currentText(),
+            "hybrid_octree_prefilter": self._hy_prefilter.value(),
+            "hybrid_final_clusters": self._hy_final.value(),
+            "hybrid_colorspace": self._hy_colorspace.currentText(),
+            "gmm_covariance_type": self._gmm_cov.currentText(),
+            "gmm_max_iter": self._gmm_iter.value(),
+        }
 
 
 @dataclass
@@ -304,6 +667,12 @@ class MainWindow(QMainWindow):
         self._debug_button.setToolTip("Zeigt detaillierte Farbanalyse-Informationen")
         toolbar_layout.addWidget(self._debug_button)
 
+        # Advanced settings button
+        self._advanced_button = QPushButton("⚙️")
+        self._advanced_button.setMaximumWidth(40)
+        self._advanced_button.setToolTip("Erweiterte Farbanalyse-Einstellungen")
+        toolbar_layout.addWidget(self._advanced_button)
+
         toolbar_layout.addStretch()
 
         # Update button (right side)
@@ -392,6 +761,7 @@ class MainWindow(QMainWindow):
         self._save_all_button.clicked.connect(self._save_all)
         self._display_combo.currentIndexChanged.connect(self._on_display_changed)
         self._debug_button.clicked.connect(self._show_debug_dialog)
+        self._advanced_button.clicked.connect(self._show_advanced_settings)
 
         self._outlines_panel.save_requested.connect(self._save_result)
         self._shades_panel.save_requested.connect(self._save_result)
@@ -414,6 +784,14 @@ class MainWindow(QMainWindow):
                 "Keine Debug-Informationen verfügbar.\n"
                 "Bitte zuerst ein Bild verarbeiten."
             )
+
+    def _show_advanced_settings(self) -> None:
+        """Show the advanced color analysis settings dialog."""
+        dialog = AdvancedSettingsDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Settings were saved, trigger reprocessing if image loaded
+            if self._source_image is not None:
+                self._on_settings_changed()
 
     def _on_settings_changed(self) -> None:
         """Handle settings changes."""
