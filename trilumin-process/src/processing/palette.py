@@ -1864,11 +1864,13 @@ class PaletteExtractor:
             # Fill remaining slots - cycle through ALL families fairly
             # Sort families by current count (least filled first)
             if len(colors) < num_colors:
-                max_passes = 5  # Safety limit
+                max_passes = 10  # More passes for larger palettes
+                strict_mode = True  # Start with 2:1 enforcement
+
                 for pass_num in range(max_passes):
                     if len(colors) >= num_colors:
                         break
-                    self._log(f"  Pass {pass_num + 1}:")
+                    self._log(f"  Pass {pass_num + 1} {'(strict)' if strict_mode else '(relaxed)'}:")
                     # Get families sorted by slot count (ascending)
                     sorted_by_count = sorted(
                         present_families,
@@ -1878,7 +1880,8 @@ class PaletteExtractor:
                     for family in sorted_by_count:
                         if len(colors) >= num_colors:
                             break
-                        if not can_add_family(family):
+                        # In strict mode, check 2:1 rule; in relaxed mode, skip check
+                        if strict_mode and not can_add_family(family):
                             continue
                         # Find next unused color from this family
                         family_colors_sorted = sorted(
@@ -1888,11 +1891,18 @@ class PaletteExtractor:
                         )
                         for c in family_colors_sorted:
                             if c not in colors:
-                                if add_color(c, family):
-                                    added_any = True
-                                    break
+                                colors.append(c)
+                                family_slot_counts[family] = family_slot_counts.get(family, 0) + 1
+                                self._log(f"    + Slot {len(colors)}: {c.name} ({family})")
+                                added_any = True
+                                break
                     if not added_any:
-                        break  # No more colors can be added
+                        if strict_mode:
+                            # Relax the 2:1 rule to fill remaining slots
+                            self._log(f"  2:1 Regel blockiert alle - wechsle zu relaxed mode")
+                            strict_mode = False
+                        else:
+                            break  # Truly no more colors available
 
         elif self.settings.palette_method == PaletteMethod.DIVERSE:
             # -----------------------------------------------------------------

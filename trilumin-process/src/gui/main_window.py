@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt6.QtWidgets import QToolTip
 
 from gui.widgets import (
     ImagePreview,
@@ -155,20 +156,42 @@ class AdvancedSettingsDialog(QDialog):
         self._kmeans_batch = QSpinBox()
         self._kmeans_batch.setRange(100, 10000)
         self._kmeans_batch.setValue(1024)
+        self._kmeans_batch.setToolTip(
+            "Batch Size: Anzahl der Pixel pro Trainings-Iteration.\n"
+            "Höher = schneller, aber weniger präzise.\n"
+            "Niedriger = langsamer, aber genauere Cluster.\n"
+            "Empfohlen: 1024 für gute Balance."
+        )
         kmeans_form.addRow("Batch Size:", self._kmeans_batch)
 
         self._kmeans_iter = QSpinBox()
         self._kmeans_iter.setRange(10, 500)
         self._kmeans_iter.setValue(100)
+        self._kmeans_iter.setToolTip(
+            "Maximale Anzahl der Trainings-Durchläufe.\n"
+            "Mehr Iterationen = stabilere Cluster, aber langsamer.\n"
+            "Bei Konvergenz stoppt der Algorithmus früher.\n"
+            "Empfohlen: 100 für die meisten Bilder."
+        )
         kmeans_form.addRow("Max Iterations:", self._kmeans_iter)
 
         self._use_fixed_seed = QCheckBox("Festen Seed verwenden")
         self._use_fixed_seed.setChecked(True)
+        self._use_fixed_seed.setToolTip(
+            "Mit festem Seed: Gleiche Ergebnisse bei gleichem Bild.\n"
+            "Ohne: Leicht unterschiedliche Ergebnisse bei jedem Durchlauf.\n"
+            "Empfohlen: AN für reproduzierbare Resultate."
+        )
         kmeans_form.addRow(self._use_fixed_seed)
 
         self._random_seed = QSpinBox()
         self._random_seed.setRange(0, 9999)
         self._random_seed.setValue(42)
+        self._random_seed.setToolTip(
+            "Startwert für den Zufallsgenerator.\n"
+            "Verschiedene Seeds ergeben verschiedene initiale Cluster.\n"
+            "Bei ungewöhnlichen Ergebnissen: anderen Seed probieren."
+        )
         kmeans_form.addRow("Random Seed:", self._random_seed)
 
         params_layout.addWidget(self._kmeans_group)
@@ -179,16 +202,32 @@ class AdvancedSettingsDialog(QDialog):
 
         self._ms_auto_bandwidth = QCheckBox("Bandwidth automatisch schätzen")
         self._ms_auto_bandwidth.setChecked(True)
+        self._ms_auto_bandwidth.setToolTip(
+            "Automatisch: Schätzt optimale Bandwidth aus den Daten.\n"
+            "Manuell: Eigenen Wert eingeben für mehr Kontrolle.\n"
+            "Empfohlen: Automatisch für die meisten Fälle."
+        )
         ms_form.addRow(self._ms_auto_bandwidth)
 
         self._ms_bandwidth = QDoubleSpinBox()
         self._ms_bandwidth.setRange(0.1, 50.0)
         self._ms_bandwidth.setValue(30.0)
         self._ms_bandwidth.setEnabled(False)
+        self._ms_bandwidth.setToolTip(
+            "Radius der Farbsuche im RGB-Raum.\n"
+            "Kleiner = mehr, feinere Cluster.\n"
+            "Größer = weniger, gröbere Cluster.\n"
+            "Typische Werte: 20-40 für Fotos."
+        )
         ms_form.addRow("Bandwidth:", self._ms_bandwidth)
 
         self._ms_bin_seeding = QCheckBox("Bin Seeding (schneller)")
         self._ms_bin_seeding.setChecked(True)
+        self._ms_bin_seeding.setToolTip(
+            "Verwendet diskretisierte Startpunkte statt aller Pixel.\n"
+            "AN = deutlich schneller, minimal weniger genau.\n"
+            "AUS = sehr langsam, aber maximale Genauigkeit."
+        )
         ms_form.addRow(self._ms_bin_seeding)
 
         ms_warning = QLabel("⚠️ Kann bei großen Bildern sehr langsam sein!")
@@ -205,15 +244,32 @@ class AdvancedSettingsDialog(QDialog):
         self._db_eps = QDoubleSpinBox()
         self._db_eps.setRange(0.1, 50.0)
         self._db_eps.setValue(10.0)
+        self._db_eps.setToolTip(
+            "Epsilon: Maximaler Abstand zwischen Punkten im selben Cluster.\n"
+            "Kleiner = mehr, kleinere Cluster (gut für Details).\n"
+            "Größer = weniger, größere Cluster.\n"
+            "Im Lab-Farbraum: 5-15 typisch für Fotos."
+        )
         db_form.addRow("Epsilon (max Abstand):", self._db_eps)
 
         self._db_min_samples = QSpinBox()
         self._db_min_samples.setRange(1, 100)
         self._db_min_samples.setValue(50)
+        self._db_min_samples.setToolTip(
+            "Minimale Pixel für einen gültigen Cluster.\n"
+            "Niedrig = auch kleine Farbflächen werden erfasst.\n"
+            "Hoch = nur große, dominante Farbbereiche.\n"
+            "Tipp: Niedrig (10-30) für Details, hoch (50-100) für Hauptfarben."
+        )
         db_form.addRow("Min Samples:", self._db_min_samples)
 
         self._db_colorspace = QComboBox()
         self._db_colorspace.addItems(["Lab", "RGB"])
+        self._db_colorspace.setToolTip(
+            "Lab: Perzeptuell gleichmäßig (wie Menschen Farben sehen).\n"
+            "RGB: Technischer Farbraum, schneller aber weniger akkurat.\n"
+            "Empfohlen: Lab für bessere Farbtrennung."
+        )
         db_form.addRow("Farbraum:", self._db_colorspace)
 
         db_info = QLabel("Clusteranzahl wird automatisch bestimmt")
@@ -230,15 +286,31 @@ class AdvancedSettingsDialog(QDialog):
         self._hy_prefilter = QSpinBox()
         self._hy_prefilter.setRange(32, 256)
         self._hy_prefilter.setValue(128)
+        self._hy_prefilter.setToolTip(
+            "Erster Schritt: Octree reduziert auf N Farben (schnell).\n"
+            "Mehr = feinere Vorauswahl, aber langsamer.\n"
+            "Weniger = gröbere Vorauswahl, aber schneller.\n"
+            "Empfohlen: 128 für gute Balance."
+        )
         hy_form.addRow("Octree Vorfilter:", self._hy_prefilter)
 
         self._hy_final = QSpinBox()
         self._hy_final.setRange(2, 32)
         self._hy_final.setValue(12)
+        self._hy_final.setToolTip(
+            "Zweiter Schritt: K-Means verfeinert auf N finale Cluster.\n"
+            "Sollte der gewünschten Palettengröße entsprechen.\n"
+            "Wird automatisch aus Haupteinstellung übernommen."
+        )
         hy_form.addRow("Finale Cluster:", self._hy_final)
 
         self._hy_colorspace = QComboBox()
         self._hy_colorspace.addItems(["Lab", "RGB"])
+        self._hy_colorspace.setToolTip(
+            "Farbraum für den finalen K-Means Schritt.\n"
+            "Lab: Bessere perzeptuelle Farbtrennung.\n"
+            "RGB: Schneller, aber weniger natürliche Gruppierung."
+        )
         hy_form.addRow("Farbraum (final):", self._hy_colorspace)
 
         params_layout.addWidget(self._hybrid_group)
@@ -250,11 +322,24 @@ class AdvancedSettingsDialog(QDialog):
 
         self._gmm_cov = QComboBox()
         self._gmm_cov.addItems(["full", "tied", "diag", "spherical"])
+        self._gmm_cov.setToolTip(
+            "Art der Kovarianzmatrix für Cluster-Form:\n"
+            "• full: Jeder Cluster eigene Form (am flexibelsten)\n"
+            "• tied: Alle Cluster gleiche Form\n"
+            "• diag: Nur achsenparallele Ellipsen\n"
+            "• spherical: Nur Kugeln (am schnellsten)\n"
+            "Empfohlen: 'full' für beste Qualität."
+        )
         gmm_form.addRow("Covariance Type:", self._gmm_cov)
 
         self._gmm_iter = QSpinBox()
         self._gmm_iter.setRange(10, 500)
         self._gmm_iter.setValue(100)
+        self._gmm_iter.setToolTip(
+            "Maximale EM-Iterationen für Konvergenz.\n"
+            "Mehr = bessere Konvergenz, aber langsamer.\n"
+            "100 reicht meist für gute Ergebnisse."
+        )
         gmm_form.addRow("Max Iterations:", self._gmm_iter)
 
         params_layout.addWidget(self._gmm_group)
