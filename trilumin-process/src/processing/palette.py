@@ -43,6 +43,7 @@ class PaletteSettings:
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
     palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
+    balance_mode: str = "balanced"  # "balanced" (global 2:1) or "pronounced" (cascading 2:1)
 
 
 @dataclass
@@ -1255,13 +1256,17 @@ def _generate_color_variation(
 def _calculate_balanced_slot_distribution(
     family_counts: Dict[str, int],
     target_count: int,
+    balance_mode: str = "balanced",
+    family_rankings: Optional[List[str]] = None,
 ) -> Dict[str, int]:
     """
-    Calculate how many slots each family should get, respecting 2:1 max ratio.
+    Calculate how many slots each family should get.
 
     Args:
         family_counts: Current count of colors per family.
         target_count: Total slots to fill.
+        balance_mode: "balanced" (global 2:1) or "pronounced" (cascading 2:1).
+        family_rankings: Ordered list of families for "pronounced" mode (best first).
 
     Returns:
         Dict mapping family -> target slot count.
@@ -1276,11 +1281,48 @@ def _calculate_balanced_slot_distribution(
         # Only one family - gets all slots
         return {families[0]: target_count}
 
-    # Calculate fair distribution with max 2:1 ratio
-    # With N families and max 2:1 ratio:
-    # If we have 2 families and 12 slots: max is 8:4 (2:1)
-    # If we have 3 families and 12 slots: could be 6:3:3 or 5:4:3, etc.
+    if balance_mode == "pronounced" and family_rankings:
+        # PRONOUNCED MODE: Cascading 2:1 ratio based on ranking
+        # Example: 3 families ranked A > B > C with 12 slots
+        # Ratio weights: A=4, B=2, C=1 (each rank is 2x the next)
+        # Total parts = 4+2+1 = 7, so A=7, B=3, C=2 (rounded to sum=12)
 
+        # Filter rankings to only include present families
+        ranked_families = [f for f in family_rankings if f in families]
+        # Add any families not in rankings at the end
+        for f in families:
+            if f not in ranked_families:
+                ranked_families.append(f)
+
+        n = len(ranked_families)
+
+        # Calculate weight for each rank: 2^(n-1-i) for position i
+        # So rank 0 (best) = 2^(n-1), rank 1 = 2^(n-2), ..., rank n-1 = 1
+        weights = {}
+        for i, fam in enumerate(ranked_families):
+            weights[fam] = 2 ** (n - 1 - i)
+
+        total_weight = sum(weights.values())
+
+        # Distribute slots proportionally to weights
+        target_slots = {}
+        remaining = target_count
+
+        for i, fam in enumerate(ranked_families):
+            if i == n - 1:
+                # Last family gets remaining slots
+                target_slots[fam] = max(1, remaining)
+            else:
+                # Calculate proportional share
+                share = int(round(target_count * weights[fam] / total_weight))
+                # Ensure at least 1 slot
+                share = max(1, min(share, remaining - (n - 1 - i)))
+                target_slots[fam] = share
+                remaining -= share
+
+        return target_slots
+
+    # BALANCED MODE: Global 2:1 max ratio (original behavior)
     # Start with equal distribution
     base_per_family = target_count // num_families
     remainder = target_count % num_families
@@ -1317,6 +1359,8 @@ def _fill_missing_colors(
     colors: List[ColorInfo],
     target_count: int,
     method: "PaletteMethod",
+    balance_mode: str = "balanced",
+    family_rankings: Optional[List[str]] = None,
 ) -> List[ColorInfo]:
     """
     Fill missing color slots with method-appropriate variations.
@@ -1329,6 +1373,8 @@ def _fill_missing_colors(
         colors: Current list of colors.
         target_count: Desired number of colors.
         method: Palette method (determines variation type).
+        balance_mode: "balanced" or "pronounced".
+        family_rankings: Ordered list of families for "pronounced" mode.
 
     Returns:
         Extended list with generated color variations.
@@ -1350,9 +1396,11 @@ def _fill_missing_colors(
     if not family_colors:
         return result  # No chromatic colors to work with
 
-    # Calculate target slots per family (respecting 2:1 ratio)
+    # Calculate target slots per family (respecting balance mode)
     current_counts = {f: len(cols) for f, cols in family_colors.items()}
-    target_slots = _calculate_balanced_slot_distribution(current_counts, target_count)
+    target_slots = _calculate_balanced_slot_distribution(
+        current_counts, target_count, balance_mode, family_rankings
+    )
 
     # Determine variation strategy based on method
     if method == PaletteMethod.GLOW or method == PaletteMethod.LUMINOUS:
@@ -1589,6 +1637,39 @@ class PaletteExtractor:
         num_colors = self.settings.num_colors
         num_colors = max(2, min(24, num_colors))  # Minimum 2 colors, max 24
         self.settings.num_colors = num_colors
+
+    def _get_family_rankings(self, family_stats: Dict) -> List[str]:
+        """
+        Get family rankings based on the current palette method.
+
+        For "pronounced" balance mode, this determines which families
+        get more slots (cascading 2:1 ratio).
+
+        Args:
+            family_stats: Dictionary with family statistics (area, saturation, etc.)
+
+        Returns:
+            List of family names ordered from "best" to "worst" per method.
+        """
+        families = list(family_stats.keys())
+        method = self.settings.palette_method
+
+        if method == PaletteMethod.SATURATED:
+            # Sort by maximum saturation (most saturated first)
+            families.sort(key=lambda f: family_stats[f].get('max_saturation', 0), reverse=True)
+        elif method == PaletteMethod.GLOW or method == PaletteMethod.LUMINOUS:
+            # Sort by maximum lightness (lightest first)
+            families.sort(key=lambda f: family_stats[f].get('max_lightness', 0), reverse=True)
+        elif method == PaletteMethod.STANDARD:
+            # Sort by area (most dominant first)
+            families.sort(key=lambda f: family_stats[f].get('area', 0), reverse=True)
+        elif method == PaletteMethod.INTENSIFY:
+            # Sort by intensity score (combines saturation and spread)
+            families.sort(key=lambda f: family_stats[f].get('intensity', 0), reverse=True)
+        else:  # DIVERSE - sort by saturation as default
+            families.sort(key=lambda f: family_stats[f].get('max_saturation', 0), reverse=True)
+
+        return families
 
     def extract_palette(self, image: np.ndarray) -> List[ColorInfo]:
         """
@@ -2128,11 +2209,16 @@ class PaletteExtractor:
             if fam not in ("gray", "extreme"):
                 current_family_counts[fam] = current_family_counts.get(fam, 0) + 1
 
-        # Calculate target distribution respecting 2:1 ratio
+        # Calculate family rankings based on method (for "pronounced" mode)
+        family_rankings = self._get_family_rankings(family_stats)
+
+        # Calculate target distribution respecting balance mode
         target_slots = _calculate_balanced_slot_distribution(
-            current_family_counts, self.settings.num_colors
+            current_family_counts, self.settings.num_colors,
+            self.settings.balance_mode, family_rankings
         )
-        self._log(f"Ziel-Verteilung (max 2:1 Ratio): {target_slots}")
+        self._log(f"Balance-Modus: {self.settings.balance_mode}")
+        self._log(f"Ziel-Verteilung: {target_slots}")
 
         # Group remaining colors by family
         remaining_by_family: Dict[str, List[ColorInfo]] = {}
@@ -2181,14 +2267,20 @@ class PaletteExtractor:
                 colors,
                 self.settings.num_colors,
                 self.settings.palette_method,
+                self.settings.balance_mode,
+                family_rankings,
             )
 
         # =====================================================================
         # FINAL BALANCE CHECK: Enforce 2:1 ratio on completed palette
-        # Uses cascading approach: balance most imbalanced pair first
+        # Only applies in "balanced" mode - "pronounced" keeps cascading distribution
         # =====================================================================
-        self._log(f"\n--- FINALE BALANCIERUNG ---")
-        colors = _final_balance_palette(colors, family_stats, chromatic_colors, self._log)
+        if self.settings.balance_mode == "balanced":
+            self._log(f"\n--- FINALE BALANCIERUNG (balanced mode) ---")
+            colors = _final_balance_palette(colors, family_stats, chromatic_colors, self._log)
+        else:
+            self._log(f"\n--- KEINE FINALE BALANCIERUNG (pronounced mode) ---")
+            self._log(f"  Behalte kaskadierende Verteilung")
 
         # Log final distribution
         self._log(f"\n--- FINALE PALETTE ({len(colors)} Farben) ---")

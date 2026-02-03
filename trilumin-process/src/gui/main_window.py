@@ -522,6 +522,7 @@ class ProcessingOptions:
     num_colors: int = 9
     edge_sensitivity: float = 0.5
     palette_method: PaletteMethod = PaletteMethod.DIVERSE
+    balance_mode: str = "balanced"  # "balanced" or "pronounced"
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"
     add_numbers: bool = True
@@ -578,6 +579,7 @@ class ProcessingWorker(QThread):
                 sort_method=opts.sort_method,
                 grays_position=opts.grays_position,
                 palette_method=opts.palette_method,
+                balance_mode=opts.balance_mode,
             )
             palette_extractor = PaletteExtractor(palette_settings)
 
@@ -984,6 +986,7 @@ class MainWindow(QMainWindow):
             num_colors=self._settings_panel.get_steps(),
             edge_sensitivity=self._settings_panel.get_edge_sensitivity(),
             palette_method=self._settings_panel.get_palette_method(),
+            balance_mode=self._settings_panel.get_balance_mode(),
             sort_method=self._settings_panel.get_sort_method(),
             grays_position=self._settings_panel.get_grays_position(),
             add_numbers=self._settings_panel.should_add_numbers(),
