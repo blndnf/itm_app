@@ -533,6 +533,7 @@ class ProcessingOptions:
     abstraction_settings: Optional[AbstractionSettings] = None
     color_boost: bool = False
     palette_source: str = "original"  # "original" or "preprocessed"
+    advanced_params: Optional[dict] = None  # Advanced clustering settings
 
 
 class ProcessingWorker(QThread):
@@ -580,6 +581,7 @@ class ProcessingWorker(QThread):
                 grays_position=opts.grays_position,
                 palette_method=opts.palette_method,
                 balance_mode=opts.balance_mode,
+                advanced_params=opts.advanced_params,
             )
             palette_extractor = PaletteExtractor(palette_settings)
 
@@ -981,6 +983,27 @@ class MainWindow(QMainWindow):
                 detail_level=self._abstraction_panel.get_detail_level(),
             )
 
+        # Read advanced settings from QSettings (saved by AdvancedSettingsDialog)
+        adv = QSettings("Trilumin", "TrialuminProcess")
+        advanced_params = {
+            "method": adv.value("advanced/method", "kmeans", type=str),
+            "cascading": adv.value("advanced/cascading", True, type=bool),
+            "kmeans_batch_size": adv.value("advanced/kmeans/batch_size", 1024, type=int),
+            "kmeans_max_iter": adv.value("advanced/kmeans/max_iter", 100, type=int),
+            "use_fixed_seed": adv.value("advanced/use_fixed_seed", True, type=bool),
+            "random_state": adv.value("advanced/random_seed", 42, type=int),
+            "mean_shift_auto_bandwidth": adv.value("advanced/mean_shift/auto_bandwidth", True, type=bool),
+            "mean_shift_bandwidth": adv.value("advanced/mean_shift/bandwidth", 30.0, type=float),
+            "dbscan_eps": adv.value("advanced/dbscan/eps", 10.0, type=float),
+            "dbscan_min_samples": adv.value("advanced/dbscan/min_samples", 50, type=int),
+            "dbscan_colorspace": adv.value("advanced/dbscan/colorspace", "Lab", type=str),
+            "hybrid_octree_prefilter": adv.value("advanced/hybrid/prefilter", 128, type=int),
+            "hybrid_final_clusters": adv.value("advanced/hybrid/final", 12, type=int),
+            "hybrid_colorspace": adv.value("advanced/hybrid/colorspace", "Lab", type=str),
+            "gmm_covariance_type": adv.value("advanced/gmm/covariance", "full", type=str),
+            "gmm_max_iter": adv.value("advanced/gmm/max_iter", 100, type=int),
+        }
+
         return ProcessingOptions(
             num_values=self._settings_panel.get_values(),
             num_colors=self._settings_panel.get_steps(),
@@ -997,6 +1020,7 @@ class MainWindow(QMainWindow):
             abstraction_settings=abstraction_settings,
             color_boost=self._abstraction_panel.is_color_boost_enabled(),
             palette_source=self._abstraction_panel.get_palette_source(),
+            advanced_params=advanced_params,
         )
 
     def _process_image(self, is_new_image: bool = False) -> None:

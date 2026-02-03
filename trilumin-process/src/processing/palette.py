@@ -1,4 +1,4 @@
-"""Color palette extraction using K-Means clustering."""
+"""Color palette extraction using multiple clustering methods."""
 
 import colorsys
 from dataclasses import dataclass, field
@@ -8,6 +8,8 @@ from typing import Optional, List, Tuple, Dict
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
+
+from processing.color_analysis import ColorAnalysisEngine, AnalysisParameters
 from PIL import Image, ImageDraw, ImageFont
 
 from utils.color_naming import rgb_to_name, get_text_color_for_background, is_gray
@@ -43,7 +45,8 @@ class PaletteSettings:
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
     palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
-    balance_mode: str = "balanced"  # "balanced" (global 2:1) or "pronounced" (cascading 2:1)
+    balance_mode: str = "balanced"  # "balanced" (global 2:1) or "pronounced" (adjacent 2:1)
+    advanced_params: Optional[dict] = None  # Advanced clustering settings from dialog
 
 
 @dataclass
@@ -466,16 +469,17 @@ def _balance_family_distribution(
     colors: List["ColorInfo"],
     family_stats: Dict[str, Dict],
     method: "PaletteMethod",
-    chromatic_colors: List["ColorInfo"]
+    chromatic_colors: List["ColorInfo"],
+    balance_mode: str = "balanced",
+    family_rankings: Optional[List[str]] = None,
 ) -> List["ColorInfo"]:
     """
     Post-processing: Balance family distribution in palette.
 
     RULES:
     1. Every present family must have at least 1 color
-    2. No family can have more than 2x the colors of any other family
-       (If ratio > 2:1, merge two lowest-saturation of dominant family,
-        fill freed slot with underrepresented family)
+    2. balanced: No family can have more than 2x of ANY other family
+       pronounced: 2:1 only enforced between ADJACENT families in ranking
     3. Apply recursively (domino effect) until balanced
     """
     if len(colors) < 3:
@@ -530,13 +534,20 @@ def _balance_family_distribution(
                         tried_pairs.add(pair_key)
                         break
 
-        # PRIORITY 2: Find ANY pair where ratio > 2:1
+        # PRIORITY 2: Find pairs where ratio > 2:1
+        # balanced: check ALL pairs; pronounced: check only ADJACENT in ranking
         if not found_imbalance:
-            for i in range(len(sorted_families)):
-                fam_i, count_i = sorted_families[i]
-                for j in range(i + 1, len(sorted_families)):
-                    fam_j, count_j = sorted_families[j]
-                    # Check if ratio > 2:1 (i.e., count_i > count_j * 2)
+            if balance_mode == "pronounced" and family_rankings:
+                # Only check adjacent pairs in method ranking
+                ranked_present = [f for f in family_rankings if f in family_counts]
+                for f in family_counts:
+                    if f not in ranked_present:
+                        ranked_present.append(f)
+                for i in range(len(ranked_present) - 1):
+                    fam_i = ranked_present[i]
+                    fam_j = ranked_present[i + 1]
+                    count_i = family_counts.get(fam_i, 0)
+                    count_j = family_counts.get(fam_j, 0)
                     if count_i > count_j * 2 and count_i >= 3:
                         pair_key = (fam_i, fam_j)
                         if pair_key not in tried_pairs:
@@ -545,8 +556,22 @@ def _balance_family_distribution(
                             found_imbalance = True
                             tried_pairs.add(pair_key)
                             break
-                if found_imbalance:
-                    break
+            else:
+                # Balanced: check ALL pairs
+                for i in range(len(sorted_families)):
+                    fam_i, count_i = sorted_families[i]
+                    for j in range(i + 1, len(sorted_families)):
+                        fam_j, count_j = sorted_families[j]
+                        if count_i > count_j * 2 and count_i >= 3:
+                            pair_key = (fam_i, fam_j)
+                            if pair_key not in tried_pairs:
+                                dominant_family = fam_i
+                                underrepresented_family = fam_j
+                                found_imbalance = True
+                                tried_pairs.add(pair_key)
+                                break
+                    if found_imbalance:
+                        break
 
         if not found_imbalance:
             break  # Palette is balanced
@@ -1693,21 +1718,71 @@ class PaletteExtractor:
         # Methods only SELECT from analyzed colors - analysis must be identical!
         total_clusters = 48  # Fine-grained analysis for all methods
 
-        # Perform K-Means clustering
-        self._kmeans = KMeans(
-            n_clusters=total_clusters,
-            max_iter=self.settings.max_iterations,
-            random_state=self.settings.random_state,
-            n_init=10,
-        )
-        self._kmeans.fit(sample_pixels)
+        # Determine clustering method from advanced settings
+        adv = self.settings.advanced_params or {}
+        clustering_method = adv.get("method", "kmeans")
 
-        # Get cluster centers (colors)
-        all_cluster_colors = self._kmeans.cluster_centers_.astype(np.uint8)
+        self._log(f"Clustering-Methode: {clustering_method}")
 
-        # Predict labels for all pixels to calculate percentages
-        all_labels = self._kmeans.predict(pixels)
-        self._labels = all_labels
+        if clustering_method != "kmeans":
+            # Use ColorAnalysisEngine for non-default methods
+            params = AnalysisParameters(
+                n_colors=total_clusters,
+                random_state=adv.get("random_state", 42) if adv.get("use_fixed_seed", True) else None,
+                use_fixed_seed=adv.get("use_fixed_seed", True),
+                kmeans_batch_size=adv.get("kmeans_batch_size", 1024),
+                kmeans_max_iter=adv.get("kmeans_max_iter", 100),
+                mean_shift_bandwidth=adv.get("mean_shift_bandwidth", 30.0) if not adv.get("mean_shift_auto_bandwidth", True) else None,
+                mean_shift_auto_bandwidth=adv.get("mean_shift_auto_bandwidth", True),
+                dbscan_eps=adv.get("dbscan_eps", 10.0),
+                dbscan_min_samples=adv.get("dbscan_min_samples", 50),
+                dbscan_colorspace=adv.get("dbscan_colorspace", "Lab"),
+                hybrid_octree_prefilter=adv.get("hybrid_octree_prefilter", 128),
+                hybrid_final_clusters=total_clusters,
+                hybrid_colorspace=adv.get("hybrid_colorspace", "Lab"),
+                gmm_covariance_type=adv.get("gmm_covariance_type", "full"),
+                gmm_max_iter=adv.get("gmm_max_iter", 100),
+            )
+            engine = ColorAnalysisEngine(method=clustering_method, params=params)
+            palette_rgb = engine.extract_palette(rgb_image, n_colors=total_clusters)
+
+            # Convert palette to cluster centers array
+            all_cluster_colors = np.array(palette_rgb, dtype=np.uint8)
+            n_found = len(all_cluster_colors)
+            self._log(f"  {clustering_method} fand {n_found} Cluster")
+
+            # Assign labels to all pixels via nearest-neighbor (batched for memory)
+            centers_float = all_cluster_colors.astype(np.float32)
+            all_labels = np.empty(len(pixels), dtype=np.int32)
+            batch_size = 10000
+            for start in range(0, len(pixels), batch_size):
+                end = min(start + batch_size, len(pixels))
+                batch = pixels[start:end]
+                dists = np.linalg.norm(
+                    batch[:, np.newaxis, :] - centers_float[np.newaxis, :, :], axis=2
+                )
+                all_labels[start:end] = np.argmin(dists, axis=1)
+            self._labels = all_labels
+            self._kmeans = None
+        else:
+            # Default: K-Means clustering
+            random_state = adv.get("random_state", self.settings.random_state) if adv.get("use_fixed_seed", True) else None
+            max_iter = adv.get("kmeans_max_iter", self.settings.max_iterations)
+
+            self._kmeans = KMeans(
+                n_clusters=total_clusters,
+                max_iter=max_iter,
+                random_state=random_state,
+                n_init=10,
+            )
+            self._kmeans.fit(sample_pixels)
+
+            # Get cluster centers (colors)
+            all_cluster_colors = self._kmeans.cluster_centers_.astype(np.uint8)
+
+            # Predict labels for all pixels to calculate percentages
+            all_labels = self._kmeans.predict(pixels)
+            self._labels = all_labels
 
         # Calculate percentage of each color
         unique, counts = np.unique(all_labels, return_counts=True)
@@ -2161,8 +2236,13 @@ class PaletteExtractor:
             fam = _get_color_family(c.rgb)
             self._log(f"  Slot {i+1}: {c.name} ({fam})")
 
+        # Calculate family rankings (used for "pronounced" mode)
+        family_rankings = self._get_family_rankings(family_stats)
+        self._log(f"Balance-Modus: {self.settings.balance_mode}, Ranking: {family_rankings}")
+
         colors = _balance_family_distribution(
-            colors, family_stats, self.settings.palette_method, chromatic_colors
+            colors, family_stats, self.settings.palette_method, chromatic_colors,
+            self.settings.balance_mode, family_rankings
         )
 
         self._log(f"\n--- NACH BALANCIERUNG ---")

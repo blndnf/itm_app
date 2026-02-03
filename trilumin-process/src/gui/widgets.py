@@ -103,7 +103,7 @@ class ImagePreview(QWidget):
         self._is_zoomed: bool = False
         self._normal_pixmap: Optional[QPixmap] = None
         self._full_pixmap: Optional[QPixmap] = None  # Full-size image for zoom
-        self._zoom_factor: float = 2.5  # Zoom magnification
+        self._zoom_factor: float = 1.5  # Zoom magnification (60% of original 2.5)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
