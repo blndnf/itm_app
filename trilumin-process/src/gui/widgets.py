@@ -100,6 +100,8 @@ class ImagePreview(QWidget):
         self._title = title
         self._zoom_window: Optional[ZoomWindow] = None
         self._is_rgb: bool = False
+        self._is_zoomed: bool = False
+        self._normal_pixmap: Optional[QPixmap] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -126,6 +128,8 @@ class ImagePreview(QWidget):
         self._image_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        # Set pointing hand cursor to indicate clickable for zoom
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self._scroll_area.setWidget(self._image_label)
         layout.addWidget(self._scroll_area)
@@ -185,6 +189,7 @@ class ImagePreview(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
 
+        self._normal_pixmap = scaled_pixmap
         self._image_label.setPixmap(scaled_pixmap)
 
     def get_image(self) -> Optional[np.ndarray]:
@@ -195,6 +200,8 @@ class ImagePreview(QWidget):
         """Clear the displayed image."""
         self._image = None
         self._is_rgb = False
+        self._is_zoomed = False
+        self._normal_pixmap = None
         self._image_label.clear()
         self._image_label.setText("Kein Bild")
         if self._zoom_window:
@@ -202,14 +209,85 @@ class ImagePreview(QWidget):
             self._zoom_window = None
 
     def mousePressEvent(self, event) -> None:
-        """Handle mouse press events - open zoom window."""
-        if self._image is not None:
-            self._show_zoom_window()
+        """Handle mouse press events - zoom in while held."""
+        if self._image is not None and not self._is_zoomed:
+            self._show_zoomed_view()
         self.clicked.emit()
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:
+        """Handle mouse release events - restore normal view."""
+        if self._is_zoomed:
+            self._restore_normal_view()
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        """Handle mouse leaving widget - restore normal view."""
+        if self._is_zoomed:
+            self._restore_normal_view()
+        super().leaveEvent(event)
+
+    def _show_zoomed_view(self) -> None:
+        """Show the image at full/larger size while mouse is held."""
+        if self._image is None:
+            return
+
+        self._is_zoomed = True
+
+        # Convert to RGB if needed
+        if len(self._image.shape) == 2:
+            display_image = cv2.cvtColor(self._image, cv2.COLOR_GRAY2RGB)
+        elif not self._is_rgb:
+            display_image = cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB)
+        else:
+            display_image = self._image
+
+        # Create QImage
+        height, width = display_image.shape[:2]
+        if len(display_image.shape) == 3:
+            bytes_per_line = 3 * width
+            qimage = QImage(
+                display_image.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_RGB888,
+            )
+        else:
+            bytes_per_line = width
+            qimage = QImage(
+                display_image.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_Grayscale8,
+            )
+
+        # Show at larger size (2x or actual size, whichever fits better)
+        pixmap = QPixmap.fromImage(qimage)
+        available_size = self._scroll_area.size()
+
+        # Calculate zoom level: 2x normal or actual size
+        target_width = min(width, available_size.width() * 2)
+        target_height = min(height, available_size.height() * 2)
+
+        zoomed_pixmap = pixmap.scaled(
+            target_width,
+            target_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        self._image_label.setPixmap(zoomed_pixmap)
+
+    def _restore_normal_view(self) -> None:
+        """Restore the normal scaled view."""
+        self._is_zoomed = False
+        if self._normal_pixmap:
+            self._image_label.setPixmap(self._normal_pixmap)
+
     def _show_zoom_window(self) -> None:
-        """Show or update the zoom window."""
+        """Show or update the zoom window (legacy, kept for compatibility)."""
         if self._zoom_window is None:
             self._zoom_window = ZoomWindow(self._title)
         self._zoom_window.set_image(self._image, self._is_rgb)

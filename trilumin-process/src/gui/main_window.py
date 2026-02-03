@@ -662,7 +662,7 @@ class ProcessingWorker(QThread):
             )
 
             # Create composite overlay: Colors with Shades luminosity applied
-            # Preserves color saturation while applying value structure
+            # Uses soft light blending to preserve colors in dark areas
             self.progress.emit("Erstelle Überlagerung...")
             shades_no_numbers = shade_quantizer.quantize(working_image, add_numbers=False)
             colors_no_numbers = palette_extractor.create_posterized_image(
@@ -671,7 +671,7 @@ class ProcessingWorker(QThread):
 
             import cv2
 
-            # Convert shades to single channel luminosity
+            # Convert shades to single channel luminosity (0-1 range)
             if len(shades_no_numbers.shape) == 2:
                 luminosity = shades_no_numbers.astype(np.float32) / 255.0
             else:
@@ -679,10 +679,40 @@ class ProcessingWorker(QThread):
 
             # Convert colors to HSV to preserve hue and saturation
             colors_hsv = cv2.cvtColor(colors_no_numbers, cv2.COLOR_BGR2HSV).astype(np.float32)
+            original_v = colors_hsv[:, :, 2] / 255.0  # Normalize to 0-1
 
-            # Apply shades as value channel (luminosity blend)
-            # This preserves color hue and saturation while using shade structure
-            colors_hsv[:, :, 2] = luminosity * 255.0
+            # IMPROVED BLEND: Soft light formula with floor
+            # Soft light: if lum < 0.5: result = original - (1-2*lum) * original * (1-original)
+            #             if lum >= 0.5: result = original + (2*lum-1) * (D(original) - original)
+            # where D(x) = sqrt(x) for simplicity
+
+            # Apply minimum floor to prevent pure black (lift shadows)
+            min_floor = 0.15  # Minimum value - prevents pure black
+            luminosity_lifted = min_floor + luminosity * (1.0 - min_floor)
+
+            # Soft light blend between original V and shades
+            mask_dark = luminosity_lifted < 0.5
+            mask_light = ~mask_dark
+
+            blended_v = np.zeros_like(original_v)
+
+            # Dark areas: darken gently
+            dark_lum = luminosity_lifted[mask_dark]
+            dark_orig = original_v[mask_dark]
+            blended_v[mask_dark] = dark_orig - (1 - 2 * dark_lum) * dark_orig * (1 - dark_orig)
+
+            # Light areas: lighten gently
+            light_lum = luminosity_lifted[mask_light]
+            light_orig = original_v[mask_light]
+            # Using sqrt for dodge function
+            d_orig = np.sqrt(light_orig)
+            blended_v[mask_light] = light_orig + (2 * light_lum - 1) * (d_orig - light_orig)
+
+            # Mix: 70% soft light result, 30% direct luminosity (for structure)
+            final_v = 0.7 * blended_v + 0.3 * luminosity_lifted
+
+            # Apply to HSV
+            colors_hsv[:, :, 2] = np.clip(final_v * 255.0, 0, 255)
 
             # Convert back to BGR
             colors_hsv = np.clip(colors_hsv, 0, 255).astype(np.uint8)

@@ -1380,7 +1380,7 @@ def _fill_missing_colors(
         color_cycle_index = 0
         strength = 0.15
         attempts = 0
-        max_attempts = slots_to_fill * 20  # Safety limit
+        max_attempts = slots_to_fill * 30  # Safety limit (increased)
 
         while slots_to_fill > 0 and attempts < max_attempts:
             attempts += 1
@@ -1390,11 +1390,16 @@ def _fill_missing_colors(
             # Generate variation
             new_rgb = _generate_color_variation(base_color.rgb, var_type, strength)
 
+            # Progressive relaxation of uniqueness threshold
+            # Start strict (0.08), relax as attempts increase
+            progress = attempts / max_attempts
+            min_distance = 0.08 * (1 - progress * 0.6)  # Relax to 0.032 at max
+
             # Check if this color is too similar to existing ones
             is_unique = True
             for existing in result:
                 dist = _color_distance_hsl(new_rgb, existing.rgb)
-                if dist < 0.08:  # Too similar
+                if dist < min_distance:  # Too similar
                     is_unique = False
                     break
 
@@ -1412,6 +1417,20 @@ def _fill_missing_colors(
                 color_cycle_index = 0
                 variation_index += 1
                 strength += 0.08
+
+        # FALLBACK: If still slots to fill after max_attempts, force-add variations
+        if slots_to_fill > 0 and base_colors:
+            for i in range(slots_to_fill):
+                base_color = base_colors[i % len(base_colors)]
+                var_type = variation_types[(variation_index + i) % len(variation_types)]
+                # Use higher strength to ensure different color
+                new_rgb = _generate_color_variation(base_color.rgb, var_type, strength + 0.2 * (i + 1))
+                new_color = ColorInfo.from_rgb(
+                    new_rgb[0], new_rgb[1], new_rgb[2],
+                    base_color.percentage * 0.3,
+                    index=len(result) + 1,
+                )
+                result.append(new_color)
 
     return result
 
