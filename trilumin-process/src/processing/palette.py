@@ -648,22 +648,20 @@ def _final_balance_palette(
     colors: List["ColorInfo"],
     family_stats: Dict[str, Dict],
     chromatic_colors: List["ColorInfo"],
-    log_func=None
+    log_func=None,
+    balance_mode: str = "balanced",
+    family_rankings: Optional[List[str]] = None,
 ) -> List["ColorInfo"]:
     """
     Final balance enforcement on completed palette.
-
-    Uses CASCADING approach:
-    1. Find most imbalanced pair (e.g., B:O = 8:1)
-    2. Cluster 2 from dominant family, add 1 from underrepresented
-    3. Check if this creates new imbalance (cascade)
-    4. Repeat until all pairs are ≤ 2:1
 
     Args:
         colors: List of colors in palette (all slots filled).
         family_stats: Statistics about families in image.
         chromatic_colors: All available chromatic colors.
         log_func: Optional logging function.
+        balance_mode: "balanced" (check ALL pairs) or "pronounced" (check ADJACENT only).
+        family_rankings: Ordered family list for "pronounced" mode.
 
     Returns:
         Balanced list of colors.
@@ -693,27 +691,48 @@ def _final_balance_palette(
         if len(family_counts) < 2:
             break
 
-        # Find most imbalanced pair
-        sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
-
-        # Find pair with worst ratio
+        # Find pairs to check based on balance_mode
         worst_ratio = 0
         dominant_fam = None
         under_fam = None
 
-        for i, (fam_i, count_i) in enumerate(sorted_families):
-            for j in range(i + 1, len(sorted_families)):
-                fam_j, count_j = sorted_families[j]
+        if balance_mode == "pronounced" and family_rankings:
+            # PRONOUNCED: Only check ADJACENT pairs in ranking
+            # Filter to present families in ranking order
+            ranked_present = [f for f in family_rankings if f in family_counts]
+            # Add any not in ranking
+            for f in family_counts:
+                if f not in ranked_present:
+                    ranked_present.append(f)
+
+            for i in range(len(ranked_present) - 1):
+                fam_i = ranked_present[i]
+                fam_j = ranked_present[i + 1]
+                count_i = family_counts.get(fam_i, 0)
+                count_j = family_counts.get(fam_j, 0)
                 if count_j > 0:
                     ratio = count_i / count_j
                     if ratio > worst_ratio:
                         worst_ratio = ratio
                         dominant_fam = fam_i
                         under_fam = fam_j
+            log(f"  Pronounced-Modus: Prüfe nur benachbarte Paare")
+        else:
+            # BALANCED: Check ALL pairs (original behavior)
+            sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
+            for i, (fam_i, count_i) in enumerate(sorted_families):
+                for j in range(i + 1, len(sorted_families)):
+                    fam_j, count_j = sorted_families[j]
+                    if count_j > 0:
+                        ratio = count_i / count_j
+                        if ratio > worst_ratio:
+                            worst_ratio = ratio
+                            dominant_fam = fam_i
+                            under_fam = fam_j
 
         # Check if ratio exceeds 2:1
         if worst_ratio <= 2.0:
-            log(f"  Alle Verhältnisse ≤ 2:1, Balancierung abgeschlossen.")
+            log(f"  Alle relevanten Verhältnisse ≤ 2:1, Balancierung abgeschlossen.")
             break
 
         log(f"  Iteration {iteration + 1}: {dominant_fam}:{under_fam} = "
@@ -1265,8 +1284,8 @@ def _calculate_balanced_slot_distribution(
     Args:
         family_counts: Current count of colors per family.
         target_count: Total slots to fill.
-        balance_mode: "balanced" (global 2:1) or "pronounced" (cascading 2:1).
-        family_rankings: Ordered list of families for "pronounced" mode (best first).
+        balance_mode: "balanced" or "pronounced" (ratio enforcement happens elsewhere).
+        family_rankings: Ordered list of families (used for proportional distribution).
 
     Returns:
         Dict mapping family -> target slot count.
@@ -1281,48 +1300,6 @@ def _calculate_balanced_slot_distribution(
         # Only one family - gets all slots
         return {families[0]: target_count}
 
-    if balance_mode == "pronounced" and family_rankings:
-        # PRONOUNCED MODE: Cascading 2:1 ratio based on ranking
-        # Example: 3 families ranked A > B > C with 12 slots
-        # Ratio weights: A=4, B=2, C=1 (each rank is 2x the next)
-        # Total parts = 4+2+1 = 7, so A=7, B=3, C=2 (rounded to sum=12)
-
-        # Filter rankings to only include present families
-        ranked_families = [f for f in family_rankings if f in families]
-        # Add any families not in rankings at the end
-        for f in families:
-            if f not in ranked_families:
-                ranked_families.append(f)
-
-        n = len(ranked_families)
-
-        # Calculate weight for each rank: 2^(n-1-i) for position i
-        # So rank 0 (best) = 2^(n-1), rank 1 = 2^(n-2), ..., rank n-1 = 1
-        weights = {}
-        for i, fam in enumerate(ranked_families):
-            weights[fam] = 2 ** (n - 1 - i)
-
-        total_weight = sum(weights.values())
-
-        # Distribute slots proportionally to weights
-        target_slots = {}
-        remaining = target_count
-
-        for i, fam in enumerate(ranked_families):
-            if i == n - 1:
-                # Last family gets remaining slots
-                target_slots[fam] = max(1, remaining)
-            else:
-                # Calculate proportional share
-                share = int(round(target_count * weights[fam] / total_weight))
-                # Ensure at least 1 slot
-                share = max(1, min(share, remaining - (n - 1 - i)))
-                target_slots[fam] = share
-                remaining -= share
-
-        return target_slots
-
-    # BALANCED MODE: Global 2:1 max ratio (original behavior)
     # Start with equal distribution
     base_per_family = target_count // num_families
     remainder = target_count % num_families
@@ -1334,23 +1311,26 @@ def _calculate_balanced_slot_distribution(
     for i, fam in enumerate(sorted_families):
         target_slots[fam] = base_per_family + (1 if i < remainder else 0)
 
-    # Enforce max 2:1 ratio
-    # Find min and max, adjust if ratio > 2:1
-    for _ in range(10):  # Iterate to converge
-        min_count = min(target_slots.values())
-        max_count = max(target_slots.values())
+    # In BALANCED mode: Enforce max 2:1 ratio globally
+    if balance_mode == "balanced":
+        for _ in range(10):  # Iterate to converge
+            min_count = min(target_slots.values())
+            max_count = max(target_slots.values())
 
-        if max_count <= min_count * 2:
-            break  # Ratio is OK
+            if max_count <= min_count * 2:
+                break  # Ratio is OK
 
-        # Find families with max count and reduce them
-        # Give to families with min count
-        max_families = [f for f, c in target_slots.items() if c == max_count]
-        min_families = [f for f, c in target_slots.items() if c == min_count]
+            # Find families with max count and reduce them
+            # Give to families with min count
+            max_families = [f for f, c in target_slots.items() if c == max_count]
+            min_families = [f for f, c in target_slots.items() if c == min_count]
 
-        if max_families and min_families:
-            target_slots[max_families[0]] -= 1
-            target_slots[min_families[0]] += 1
+            if max_families and min_families:
+                target_slots[max_families[0]] -= 1
+                target_slots[min_families[0]] += 1
+
+    # In PRONOUNCED mode: No enforcement here - done in _final_balance_palette
+    # (only adjacent pairs in ranking are checked there)
 
     return target_slots
 
@@ -2273,14 +2253,13 @@ class PaletteExtractor:
 
         # =====================================================================
         # FINAL BALANCE CHECK: Enforce 2:1 ratio on completed palette
-        # Only applies in "balanced" mode - "pronounced" keeps cascading distribution
+        # Balanced: checks ALL pairs; Pronounced: checks only ADJACENT pairs in ranking
         # =====================================================================
-        if self.settings.balance_mode == "balanced":
-            self._log(f"\n--- FINALE BALANCIERUNG (balanced mode) ---")
-            colors = _final_balance_palette(colors, family_stats, chromatic_colors, self._log)
-        else:
-            self._log(f"\n--- KEINE FINALE BALANCIERUNG (pronounced mode) ---")
-            self._log(f"  Behalte kaskadierende Verteilung")
+        self._log(f"\n--- FINALE BALANCIERUNG ({self.settings.balance_mode} mode) ---")
+        colors = _final_balance_palette(
+            colors, family_stats, chromatic_colors, self._log,
+            self.settings.balance_mode, family_rankings
+        )
 
         # Log final distribution
         self._log(f"\n--- FINALE PALETTE ({len(colors)} Farben) ---")

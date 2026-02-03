@@ -102,6 +102,8 @@ class ImagePreview(QWidget):
         self._is_rgb: bool = False
         self._is_zoomed: bool = False
         self._normal_pixmap: Optional[QPixmap] = None
+        self._full_pixmap: Optional[QPixmap] = None  # Full-size image for zoom
+        self._zoom_factor: float = 2.5  # Zoom magnification
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -190,6 +192,7 @@ class ImagePreview(QWidget):
         )
 
         self._normal_pixmap = scaled_pixmap
+        self._full_pixmap = pixmap  # Store full-size for zoom
         self._image_label.setPixmap(scaled_pixmap)
 
     def get_image(self) -> Optional[np.ndarray]:
@@ -202,6 +205,7 @@ class ImagePreview(QWidget):
         self._is_rgb = False
         self._is_zoomed = False
         self._normal_pixmap = None
+        self._full_pixmap = None
         self._image_label.clear()
         self._image_label.setText("Kein Bild")
         if self._zoom_window:
@@ -211,9 +215,16 @@ class ImagePreview(QWidget):
     def mousePressEvent(self, event) -> None:
         """Handle mouse press events - zoom in while held."""
         if self._image is not None and not self._is_zoomed:
-            self._show_zoomed_view()
+            self._is_zoomed = True
+            self._update_zoomed_view(event.pos())
         self.clicked.emit()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        """Handle mouse move events - pan zoomed view."""
+        if self._is_zoomed:
+            self._update_zoomed_view(event.pos())
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         """Handle mouse release events - restore normal view."""
@@ -227,58 +238,62 @@ class ImagePreview(QWidget):
             self._restore_normal_view()
         super().leaveEvent(event)
 
-    def _show_zoomed_view(self) -> None:
-        """Show the image at full/larger size while mouse is held."""
-        if self._image is None:
+    def _update_zoomed_view(self, mouse_pos) -> None:
+        """Update the zoomed view centered on mouse position."""
+        if self._full_pixmap is None or self._normal_pixmap is None:
             return
 
-        self._is_zoomed = True
+        # Get widget and image dimensions
+        widget_w = self._scroll_area.width()
+        widget_h = self._scroll_area.height()
+        full_w = self._full_pixmap.width()
+        full_h = self._full_pixmap.height()
+        normal_w = self._normal_pixmap.width()
+        normal_h = self._normal_pixmap.height()
 
-        # Convert to RGB if needed
-        if len(self._image.shape) == 2:
-            display_image = cv2.cvtColor(self._image, cv2.COLOR_GRAY2RGB)
-        elif not self._is_rgb:
-            display_image = cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB)
-        else:
-            display_image = self._image
+        # Calculate mouse position relative to the displayed image
+        # Account for centering of the image in the scroll area
+        label_pos = self._image_label.pos()
+        img_x = mouse_pos.x() - label_pos.x()
+        img_y = mouse_pos.y() - label_pos.y()
 
-        # Create QImage
-        height, width = display_image.shape[:2]
-        if len(display_image.shape) == 3:
-            bytes_per_line = 3 * width
-            qimage = QImage(
-                display_image.data,
-                width,
-                height,
-                bytes_per_line,
-                QImage.Format.Format_RGB888,
-            )
-        else:
-            bytes_per_line = width
-            qimage = QImage(
-                display_image.data,
-                width,
-                height,
-                bytes_per_line,
-                QImage.Format.Format_Grayscale8,
-            )
+        # Clamp to image bounds
+        img_x = max(0, min(img_x, normal_w))
+        img_y = max(0, min(img_y, normal_h))
 
-        # Show at larger size (2x or actual size, whichever fits better)
-        pixmap = QPixmap.fromImage(qimage)
-        available_size = self._scroll_area.size()
+        # Convert to full image coordinates (0-1 range)
+        rel_x = img_x / normal_w if normal_w > 0 else 0.5
+        rel_y = img_y / normal_h if normal_h > 0 else 0.5
 
-        # Calculate zoom level: 2x normal or actual size
-        target_width = min(width, available_size.width() * 2)
-        target_height = min(height, available_size.height() * 2)
+        # Calculate crop region in full image
+        # Crop size = display size (so we get magnification)
+        crop_w = int(widget_w / self._zoom_factor)
+        crop_h = int(widget_h / self._zoom_factor)
 
-        zoomed_pixmap = pixmap.scaled(
-            target_width,
-            target_height,
+        # Center crop on mouse position
+        crop_x = int(rel_x * full_w - crop_w / 2)
+        crop_y = int(rel_y * full_h - crop_h / 2)
+
+        # Clamp to image bounds
+        crop_x = max(0, min(crop_x, full_w - crop_w))
+        crop_y = max(0, min(crop_y, full_h - crop_h))
+
+        # Ensure valid crop dimensions
+        crop_w = min(crop_w, full_w - crop_x)
+        crop_h = min(crop_h, full_h - crop_y)
+
+        if crop_w <= 0 or crop_h <= 0:
+            return
+
+        # Crop and scale
+        cropped = self._full_pixmap.copy(crop_x, crop_y, crop_w, crop_h)
+        scaled = cropped.scaled(
+            widget_w, widget_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
 
-        self._image_label.setPixmap(zoomed_pixmap)
+        self._image_label.setPixmap(scaled)
 
     def _restore_normal_view(self) -> None:
         """Restore the normal scaled view."""
