@@ -550,21 +550,15 @@ def _balance_family_distribution(
                     count_j = family_counts.get(fam_j, 0)
                     # Check BOTH directions - either adjacent family can dominate
                     if count_i > count_j * 2 and count_i >= 3:
-                        pair_key = (fam_i, fam_j)
-                        if pair_key not in tried_pairs:
-                            dominant_family = fam_i
-                            underrepresented_family = fam_j
-                            found_imbalance = True
-                            tried_pairs.add(pair_key)
-                            break
+                        dominant_family = fam_i
+                        underrepresented_family = fam_j
+                        found_imbalance = True
+                        break
                     elif count_j > count_i * 2 and count_j >= 3:
-                        pair_key = (fam_j, fam_i)
-                        if pair_key not in tried_pairs:
-                            dominant_family = fam_j
-                            underrepresented_family = fam_i
-                            found_imbalance = True
-                            tried_pairs.add(pair_key)
-                            break
+                        dominant_family = fam_j
+                        underrepresented_family = fam_i
+                        found_imbalance = True
+                        break
             else:
                 # Balanced: check ALL pairs
                 for i in range(len(sorted_families)):
@@ -572,13 +566,10 @@ def _balance_family_distribution(
                     for j in range(i + 1, len(sorted_families)):
                         fam_j, count_j = sorted_families[j]
                         if count_i > count_j * 2 and count_i >= 3:
-                            pair_key = (fam_i, fam_j)
-                            if pair_key not in tried_pairs:
-                                dominant_family = fam_i
-                                underrepresented_family = fam_j
-                                found_imbalance = True
-                                tried_pairs.add(pair_key)
-                                break
+                            dominant_family = fam_i
+                            underrepresented_family = fam_j
+                            found_imbalance = True
+                            break
                     if found_imbalance:
                         break
 
@@ -587,7 +578,8 @@ def _balance_family_distribution(
 
         # Check if we can actually rebalance
         if dominant_family not in family_colors or len(family_colors[dominant_family]) < 2:
-            continue  # Can't rebalance this pair, try next iteration
+            tried_pairs.add((dominant_family, underrepresented_family))
+            continue
 
         dominant_colors_list = family_colors[dominant_family]
         # Sort by saturation (lowest first - merge the least saturated ones)
@@ -700,10 +692,12 @@ def _balance_family_distribution(
                     if replacement_found:
                         break
 
-        # If still no replacement, revert the blend and continue trying other pairs
         if not replacement_found:
-            result[idx1] = color1  # Undo the blend
-            # Don't break - continue trying other imbalanced pairs
+            # Fix failed — revert blend and mark pair so we don't retry it
+            result[idx1] = color1
+            tried_pairs.add((dominant_family, underrepresented_family))
+        # If replacement found, DON'T add to tried_pairs — allow retry
+        # because ratio may still exceed 2:1 and need further iteration
 
     return result
 
@@ -739,6 +733,7 @@ def _final_balance_palette(
 
     result = list(colors)
     max_iterations = 20
+    failed_pairs = set()  # Track pairs where replacement generation failed
 
     for iteration in range(max_iterations):
         # Count colors per family
@@ -755,16 +750,14 @@ def _final_balance_palette(
         if len(family_counts) < 2:
             break
 
-        # Find pairs to check based on balance_mode
+        # Find worst ratio pair, skipping already-failed pairs
         worst_ratio = 0
         dominant_fam = None
         under_fam = None
 
         if balance_mode == "pronounced" and family_rankings:
             # PRONOUNCED: Only check ADJACENT pairs in ranking
-            # Filter to present families in ranking order
             ranked_present = [f for f in family_rankings if f in family_counts]
-            # Add any not in ranking
             for f in family_counts:
                 if f not in ranked_present:
                     ranked_present.append(f)
@@ -774,29 +767,27 @@ def _final_balance_palette(
                 fam_j = ranked_present[i + 1]
                 count_i = family_counts.get(fam_i, 0)
                 count_j = family_counts.get(fam_j, 0)
-                # Check BOTH directions - use absolute ratio between adjacent pair
                 min_count = min(count_i, count_j)
                 max_count = max(count_i, count_j)
                 if min_count > 0:
                     ratio = max_count / min_count
                     if ratio > worst_ratio:
-                        worst_ratio = ratio
-                        if count_i >= count_j:
-                            dominant_fam = fam_i
-                            under_fam = fam_j
-                        else:
-                            dominant_fam = fam_j
-                            under_fam = fam_i
+                        dom = fam_i if count_i >= count_j else fam_j
+                        und = fam_j if count_i >= count_j else fam_i
+                        if (dom, und) not in failed_pairs:
+                            worst_ratio = ratio
+                            dominant_fam = dom
+                            under_fam = und
             log(f"  Pronounced-Modus: Prüfe nur benachbarte Paare")
         else:
-            # BALANCED: Check ALL pairs (original behavior)
+            # BALANCED: Check ALL pairs
             sorted_families = sorted(family_counts.items(), key=lambda x: x[1], reverse=True)
             for i, (fam_i, count_i) in enumerate(sorted_families):
                 for j in range(i + 1, len(sorted_families)):
                     fam_j, count_j = sorted_families[j]
                     if count_j > 0:
                         ratio = count_i / count_j
-                        if ratio > worst_ratio:
+                        if ratio > worst_ratio and (fam_i, fam_j) not in failed_pairs:
                             worst_ratio = ratio
                             dominant_fam = fam_i
                             under_fam = fam_j
@@ -814,7 +805,8 @@ def _final_balance_palette(
         dom_colors = family_colors_in_result.get(dominant_fam, [])
         if len(dom_colors) < 2:
             log(f"    Kann nicht clustern - zu wenig Farben in {dominant_fam}")
-            break
+            failed_pairs.add((dominant_fam, under_fam))
+            continue
 
         dom_colors.sort(key=lambda x: _get_color_saturation(*x[1].rgb))
 
@@ -873,15 +865,15 @@ def _final_balance_palette(
                         break
 
         if replacement:
-            # Apply changes
+            # Apply changes: merge 2 dominant into 1, add 1 underrepresented
             result[idx1] = blended_color
             result[idx2] = replacement
             log(f"    Clustered: {color1.name} + {color2.name} → {blended_color.name}")
             log(f"    Added: {replacement.name} ({under_fam})")
+            # Don't mark as failed — allow retry since ratio may still exceed 2:1
         else:
             log(f"    Kein Ersatz für {under_fam} gefunden, überspringe...")
-            # Don't break - continue trying; ratio may improve from other pairs
-            continue
+            failed_pairs.add((dominant_fam, under_fam))
 
     return result
 

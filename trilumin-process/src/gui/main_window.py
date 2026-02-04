@@ -1,6 +1,7 @@
 """Main window for Trilumin Process application."""
 
 import os
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List
 
@@ -1239,6 +1240,9 @@ class MainWindow(QMainWindow):
                 else:
                     errors.append(name)
 
+        # Save settings log file for reproducibility
+        self._save_settings_log(directory, base_name)
+
         if errors:
             QMessageBox.warning(
                 self,
@@ -1255,6 +1259,90 @@ class MainWindow(QMainWindow):
                 "Gespeichert",
                 f"Alle {saved_count} Bilder wurden erfolgreich gespeichert.",
             )
+
+    def _save_settings_log(self, directory: str, base_name: str) -> None:
+        """Save a .log file with all user settings for reproducibility."""
+        log_path = os.path.join(directory, f"{base_name}.log")
+        opts = self._get_processing_options()
+        adv = opts.advanced_params or {}
+
+        lines = []
+        lines.append(f"Trilumin Process - Settings Log")
+        lines.append(f"Datum: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Quelldatei: {self._current_file_path or 'Unbekannt'}")
+        lines.append("")
+
+        # General settings
+        lines.append("[Allgemein]")
+        lines.append(f"Farbanzahl = {opts.num_colors}")
+        lines.append(f"Helligkeitsstufen = {opts.num_values}")
+        lines.append(f"Palette-Methode = {opts.palette_method.value}")
+        lines.append(f"Balance-Modus = {opts.balance_mode}")
+        lines.append(f"Sortierung = {opts.sort_method.value}")
+        lines.append(f"Grau-Position = {opts.grays_position}")
+        lines.append(f"Nummern = {opts.add_numbers}")
+        lines.append("")
+
+        # Outline settings
+        lines.append("[Konturen]")
+        lines.append(f"Quelle = {opts.outline_source.value}")
+        lines.append(f"Kantensensitivität = {opts.edge_sensitivity}")
+        lines.append(f"Min. Konturlänge = {opts.min_contour_length}")
+        lines.append(f"Max. Krümmung = {opts.max_curvature}")
+        lines.append(f"Min. Kontrast = {opts.min_contrast}")
+        lines.append("")
+
+        # Abstraction settings
+        lines.append("[Abstraktion]")
+        if opts.abstraction_settings and opts.abstraction_settings.enabled:
+            lines.append(f"Aktiviert = True")
+            lines.append(f"Methode = {opts.abstraction_settings.method}")
+            lines.append(f"Detailstufe = {opts.abstraction_settings.detail_level}")
+        else:
+            lines.append(f"Aktiviert = False")
+        lines.append(f"Farbverstärkung = {opts.color_boost}")
+        lines.append(f"Palette-Quelle = {opts.palette_source}")
+        lines.append("")
+
+        # Advanced clustering settings
+        lines.append("[Erweitert]")
+        lines.append(f"Clustering-Methode = {adv.get('method', 'kmeans')}")
+        lines.append(f"Kaskadierende Balancierung = {adv.get('cascading', True)}")
+        lines.append(f"Fester Seed = {adv.get('use_fixed_seed', True)}")
+        lines.append(f"Random Seed = {adv.get('random_state', 42)}")
+        lines.append("")
+
+        lines.append("[K-Means]")
+        lines.append(f"Batch-Größe = {adv.get('kmeans_batch_size', 1024)}")
+        lines.append(f"Max. Iterationen = {adv.get('kmeans_max_iter', 100)}")
+        lines.append("")
+
+        lines.append("[Mean-Shift]")
+        lines.append(f"Auto-Bandwidth = {adv.get('mean_shift_auto_bandwidth', True)}")
+        lines.append(f"Bandwidth = {adv.get('mean_shift_bandwidth', 30.0)}")
+        lines.append("")
+
+        lines.append("[DBSCAN]")
+        lines.append(f"Epsilon = {adv.get('dbscan_eps', 10.0)}")
+        lines.append(f"Min. Samples = {adv.get('dbscan_min_samples', 50)}")
+        lines.append(f"Farbraum = {adv.get('dbscan_colorspace', 'Lab')}")
+        lines.append("")
+
+        lines.append("[Hybrid]")
+        lines.append(f"Octree-Vorfilter = {adv.get('hybrid_octree_prefilter', 128)}")
+        lines.append(f"Finale Cluster = {adv.get('hybrid_final_clusters', 12)}")
+        lines.append(f"Farbraum = {adv.get('hybrid_colorspace', 'Lab')}")
+        lines.append("")
+
+        lines.append("[GMM]")
+        lines.append(f"Kovarianz-Typ = {adv.get('gmm_covariance_type', 'full')}")
+        lines.append(f"Max. Iterationen = {adv.get('gmm_max_iter', 100)}")
+
+        try:
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except OSError:
+            pass  # Non-critical - don't interrupt save flow
 
     def closeEvent(self, event) -> None:
         """Save settings when closing the window."""
