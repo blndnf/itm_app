@@ -670,6 +670,36 @@ def _balance_family_distribution(
                         replacement_found = True
                         break
 
+        # Strategy 5: Generate variation of existing underrepresented family color
+        if not replacement_found and underrepresented_family:
+            existing_under = [c for c in result if _get_color_family(c.rgb) == underrepresented_family]
+            if existing_under:
+                for base in existing_under:
+                    for var_type in ["lighter", "darker", "saturated", "desaturated"]:
+                        for strength in [0.15, 0.2, 0.3, 0.4]:
+                            var_rgb = _generate_color_variation(base.rgb, var_type, strength)
+                            # Progressive uniqueness relaxation
+                            for min_dist in [0.06, 0.04, 0.02]:
+                                is_unique = all(
+                                    _color_distance_hsl(var_rgb, c.rgb) >= min_dist
+                                    for c in result
+                                )
+                                if is_unique:
+                                    new_color = ColorInfo.from_rgb(
+                                        var_rgb[0], var_rgb[1], var_rgb[2],
+                                        base.percentage * 0.5,
+                                        len(result)
+                                    )
+                                    result[idx2] = new_color
+                                    replacement_found = True
+                                    break
+                            if replacement_found:
+                                break
+                        if replacement_found:
+                            break
+                    if replacement_found:
+                        break
+
         # If still no replacement, revert the blend and continue trying other pairs
         if not replacement_found:
             result[idx1] = color1  # Undo the blend
@@ -814,24 +844,33 @@ def _final_balance_palette(
                     replacement = cand
                     break
 
-        # If not found, try generating a variation
+        # If not found, try generating variations (multiple types/strengths)
         if not replacement:
             under_colors = [c for c in result if _get_color_family(c.rgb) == under_fam]
             if under_colors:
-                base = under_colors[0]
-                # Generate a variation
-                var_rgb = _generate_color_variation(base.rgb, "lighter", 0.2)
-                # Check it's different enough
-                is_unique = all(
-                    _color_distance_hsl(var_rgb, c.rgb) >= 0.08
-                    for c in result
-                )
-                if is_unique:
-                    replacement = ColorInfo.from_rgb(
-                        var_rgb[0], var_rgb[1], var_rgb[2],
-                        base.percentage * 0.5,
-                        len(result)
-                    )
+                for base in under_colors:
+                    for var_type in ["lighter", "darker", "saturated", "desaturated"]:
+                        for strength in [0.15, 0.2, 0.25, 0.3, 0.4]:
+                            var_rgb = _generate_color_variation(base.rgb, var_type, strength)
+                            # Progressive uniqueness relaxation
+                            for min_dist in [0.06, 0.04, 0.02]:
+                                is_unique = all(
+                                    _color_distance_hsl(var_rgb, c.rgb) >= min_dist
+                                    for c in result
+                                )
+                                if is_unique:
+                                    replacement = ColorInfo.from_rgb(
+                                        var_rgb[0], var_rgb[1], var_rgb[2],
+                                        base.percentage * 0.5,
+                                        len(result)
+                                    )
+                                    break
+                            if replacement:
+                                break
+                        if replacement:
+                            break
+                    if replacement:
+                        break
 
         if replacement:
             # Apply changes
@@ -841,8 +880,8 @@ def _final_balance_palette(
             log(f"    Added: {replacement.name} ({under_fam})")
         else:
             log(f"    Kein Ersatz für {under_fam} gefunden, überspringe...")
-            # Mark this pair as tried to avoid infinite loop
-            break
+            # Don't break - continue trying; ratio may improve from other pairs
+            continue
 
     return result
 
