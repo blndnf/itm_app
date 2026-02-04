@@ -548,11 +548,20 @@ def _balance_family_distribution(
                     fam_j = ranked_present[i + 1]
                     count_i = family_counts.get(fam_i, 0)
                     count_j = family_counts.get(fam_j, 0)
+                    # Check BOTH directions - either adjacent family can dominate
                     if count_i > count_j * 2 and count_i >= 3:
                         pair_key = (fam_i, fam_j)
                         if pair_key not in tried_pairs:
                             dominant_family = fam_i
                             underrepresented_family = fam_j
+                            found_imbalance = True
+                            tried_pairs.add(pair_key)
+                            break
+                    elif count_j > count_i * 2 and count_j >= 3:
+                        pair_key = (fam_j, fam_i)
+                        if pair_key not in tried_pairs:
+                            dominant_family = fam_j
+                            underrepresented_family = fam_i
                             found_imbalance = True
                             tried_pairs.add(pair_key)
                             break
@@ -735,12 +744,19 @@ def _final_balance_palette(
                 fam_j = ranked_present[i + 1]
                 count_i = family_counts.get(fam_i, 0)
                 count_j = family_counts.get(fam_j, 0)
-                if count_j > 0:
-                    ratio = count_i / count_j
+                # Check BOTH directions - use absolute ratio between adjacent pair
+                min_count = min(count_i, count_j)
+                max_count = max(count_i, count_j)
+                if min_count > 0:
+                    ratio = max_count / min_count
                     if ratio > worst_ratio:
                         worst_ratio = ratio
-                        dominant_fam = fam_i
-                        under_fam = fam_j
+                        if count_i >= count_j:
+                            dominant_fam = fam_i
+                            under_fam = fam_j
+                        else:
+                            dominant_fam = fam_j
+                            under_fam = fam_i
             log(f"  Pronounced-Modus: Prüfe nur benachbarte Paare")
         else:
             # BALANCED: Check ALL pairs (original behavior)
@@ -2118,7 +2134,7 @@ class PaletteExtractor:
             # DIVERSE: Fill by COLOR WHEEL SPREAD (360°/N separation)
             # Start with most dominant color, then find colors at optimal angles
             # -----------------------------------------------------------------
-            # Score colors by area × luminance × saturation
+            # Score colors by area × luminance × saturation (for initial seed)
             def diverse_score(c):
                 return c.percentage * _get_color_lightness(*c.rgb) * _get_color_saturation(*c.rgb) / 10000.0
 
@@ -2132,6 +2148,12 @@ class PaletteExtractor:
 
                 # Calculate optimal spread angle
                 optimal_spread = _get_optimal_hue_spread(num_colors)
+
+                # Pre-compute normalized diverse_score for all candidates
+                # so the 0.7/0.3 weighting actually works (both in [0, 1])
+                max_ds = max((diverse_score(c) for c in chromatic_colors), default=1.0)
+                if max_ds <= 0:
+                    max_ds = 1.0
 
                 # Find colors at optimal angles
                 for i in range(1, num_colors):
@@ -2150,9 +2172,10 @@ class PaletteExtractor:
                         c_hue = _get_hsl(c.rgb)[0]
                         # Circular distance to target
                         angle_diff = min(abs(c_hue - target_angle), 360 - abs(c_hue - target_angle))
-                        # Score: closer to target angle + higher diverse_score
+                        # Score: closer to target angle + normalized quality score
                         angle_score = 1.0 - (angle_diff / 180.0)  # 1.0 = exact, 0.0 = opposite
-                        combined_score = angle_score * 0.7 + diverse_score(c) * 0.3
+                        normalized_ds = diverse_score(c) / max_ds  # Normalized to [0, 1]
+                        combined_score = angle_score * 0.7 + normalized_ds * 0.3
 
                         if combined_score > best_score:
                             best_score = combined_score
