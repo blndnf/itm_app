@@ -1949,8 +1949,10 @@ class PaletteExtractor:
                 for idx, color in enumerate(colors, start=1):
                     color.index = idx
 
-                self._store_final_colors(colors)
-                self._cluster_colors = all_cluster_colors
+                # Store colors for posterization
+                self._colors = all_cluster_colors
+                self._color_to_index = {c.rgb: c.index for c in colors}
+                self._palette_colors = np.array([c.rgb for c in colors], dtype=np.uint8)
                 return colors
 
             self._log(f"Fülle verbleibende {num_colors - len(colors)} Slots aus Clustering...")
