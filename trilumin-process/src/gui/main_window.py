@@ -438,6 +438,39 @@ class AdvancedSettingsDialog(QDialog):
             self._settings.value("advanced/mean_shift/bandwidth", 30.0, type=float)
         )
 
+        # DBSCAN
+        self._db_eps.setValue(
+            self._settings.value("advanced/dbscan/eps", 10.0, type=float)
+        )
+        self._db_min_samples.setValue(
+            self._settings.value("advanced/dbscan/min_samples", 50, type=int)
+        )
+        db_colorspace = self._settings.value("advanced/dbscan/colorspace", "Lab", type=str)
+        db_idx = self._db_colorspace.findText(db_colorspace)
+        if db_idx >= 0:
+            self._db_colorspace.setCurrentIndex(db_idx)
+
+        # Hybrid
+        self._hy_prefilter.setValue(
+            self._settings.value("advanced/hybrid/prefilter", 128, type=int)
+        )
+        self._hy_final.setValue(
+            self._settings.value("advanced/hybrid/final", 12, type=int)
+        )
+        hy_colorspace = self._settings.value("advanced/hybrid/colorspace", "Lab", type=str)
+        hy_idx = self._hy_colorspace.findText(hy_colorspace)
+        if hy_idx >= 0:
+            self._hy_colorspace.setCurrentIndex(hy_idx)
+
+        # GMM
+        gmm_cov = self._settings.value("advanced/gmm/covariance", "full", type=str)
+        gmm_idx = self._gmm_cov.findText(gmm_cov)
+        if gmm_idx >= 0:
+            self._gmm_cov.setCurrentIndex(gmm_idx)
+        self._gmm_iter.setValue(
+            self._settings.value("advanced/gmm/max_iter", 100, type=int)
+        )
+
         # Trigger method change to show correct panels
         self._on_method_changed(self._method_combo.currentIndex())
 
@@ -523,7 +556,7 @@ class ProcessingOptions:
     num_colors: int = 9
     edge_sensitivity: float = 0.5
     palette_method: PaletteMethod = PaletteMethod.DIVERSE
-    balance_mode: str = "balanced"  # "balanced" or "pronounced"
+    balance_mode: str = "balanced"  # "balanced" or "off"
     sort_method: SortMethod = SortMethod.HUE
     grays_position: str = "end"
     add_numbers: bool = True
@@ -781,10 +814,10 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self._display_combo)
 
         # Debug button
-        self._debug_button = QPushButton("[debug]")
-        self._debug_button.setMaximumWidth(60)
+        self._debug_button = QPushButton("🔍")
+        self._debug_button.setMaximumWidth(40)
         self._debug_button.setEnabled(False)
-        self._debug_button.setToolTip("Zeigt detaillierte Farbanalyse-Informationen")
+        self._debug_button.setToolTip("Debug: Zeigt detaillierte Farbanalyse-Informationen")
         toolbar_layout.addWidget(self._debug_button)
 
         # Advanced settings button

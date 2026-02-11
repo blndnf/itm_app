@@ -395,19 +395,14 @@ class SettingsPanel(QWidget):
         extract_row.addWidget(self._palette_method_combo)
         sort_layout.addLayout(extract_row)
 
-        # Balance mode toggle
-        balance_row = QHBoxLayout()
-        balance_row.addWidget(QLabel("Balance:"))
-        self._balance_mode_combo = QComboBox()
-        self._balance_mode_combo.addItem("Balanced", "balanced")
-        self._balance_mode_combo.addItem("Pronounced", "pronounced")
-        self._balance_mode_combo.setToolTip(
-            "Balanced: Globales 2:1 Verhältnis zwischen allen Familien\n"
-            "Pronounced: Kaskadierendes 2:1 basierend auf Methoden-Ranking\n"
-            "  z.B. SATURATED mit O>B>Y → O:B:Y = 4:2:1"
+        # Balance toggle (on/off)
+        self._balance_checkbox = QCheckBox("Familien-Balancierung (max 2:1)")
+        self._balance_checkbox.setChecked(True)
+        self._balance_checkbox.setToolTip(
+            "Aktiviert: Max 2:1 Verhältnis zwischen allen Farbfamilien\n"
+            "Deaktiviert: Keine Einschränkung der Familienverteilung"
         )
-        balance_row.addWidget(self._balance_mode_combo)
-        sort_layout.addLayout(balance_row)
+        sort_layout.addWidget(self._balance_checkbox)
 
         # Add numbers checkbox
         self._add_numbers_checkbox = QCheckBox("Nummern anzeigen")
@@ -548,7 +543,7 @@ class SettingsPanel(QWidget):
         self._edge_slider.valueChanged.connect(self._on_edge_changed)
 
         self._palette_method_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
-        self._balance_mode_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
+        self._balance_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._add_numbers_checkbox.toggled.connect(lambda: self.settings_changed.emit())
         self._outline_source_combo.currentIndexChanged.connect(lambda: self.settings_changed.emit())
 
@@ -594,8 +589,8 @@ class SettingsPanel(QWidget):
         return self._palette_method_combo.currentData()
 
     def get_balance_mode(self) -> str:
-        """Get the balance mode ('balanced' or 'pronounced')."""
-        return self._balance_mode_combo.currentData()
+        """Get the balance mode ('balanced' or 'off')."""
+        return "balanced" if self._balance_checkbox.isChecked() else "off"
 
     def get_sort_method(self) -> SortMethod:
         """Get the palette sort method (always FAMILY - warm to cold)."""
@@ -664,9 +659,9 @@ class SettingsPanel(QWidget):
         palette_method_index = settings.value("palette_method", 0, type=int)
         self._palette_method_combo.setCurrentIndex(palette_method_index)
 
-        # Load balance mode (default: balanced = 0)
-        balance_mode_index = settings.value("balance_mode", 0, type=int)
-        self._balance_mode_combo.setCurrentIndex(balance_mode_index)
+        # Load balance enabled (default: True)
+        balance_enabled = settings.value("balance_enabled", True, type=bool)
+        self._balance_checkbox.setChecked(balance_enabled)
 
         # Load add numbers
         self._add_numbers_checkbox.setChecked(
@@ -702,7 +697,7 @@ class SettingsPanel(QWidget):
         settings.setValue("steps", self._steps_spinbox.value())
         settings.setValue("edge_sensitivity", self._edge_slider.value())
         settings.setValue("palette_method", self._palette_method_combo.currentIndex())
-        settings.setValue("balance_mode", self._balance_mode_combo.currentIndex())
+        settings.setValue("balance_enabled", self._balance_checkbox.isChecked())
         settings.setValue("add_numbers", self._add_numbers_checkbox.isChecked())
         settings.setValue("outline_source", self._outline_source_combo.currentIndex())
         settings.setValue("min_contour_length", self._min_length_slider.value())

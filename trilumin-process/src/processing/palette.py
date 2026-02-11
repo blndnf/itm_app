@@ -45,7 +45,7 @@ class PaletteSettings:
     grays_position: str = "end"  # "start", "end", or "mixed"
     gray_threshold: float = 12.0  # Saturation threshold for grays
     palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
-    balance_mode: str = "balanced"  # "balanced" (global 2:1) or "pronounced" (adjacent 2:1)
+    balance_mode: str = "balanced"  # "balanced" (global 2:1) or "off" (no balancing)
     advanced_params: Optional[dict] = None  # Advanced clustering settings from dialog
 
 
@@ -479,10 +479,14 @@ def _balance_family_distribution(
     RULES:
     1. Every present family must have at least 1 color
     2. balanced: No family can have more than 2x of ANY other family
-       pronounced: 2:1 only enforced between ADJACENT families in ranking
+       off: No balancing applied
     3. Apply recursively (domino effect) until balanced
     """
     if len(colors) < 3:
+        return colors
+
+    # If balancing is disabled, return unchanged
+    if balance_mode == "off":
         return colors
 
     result = list(colors)
@@ -725,6 +729,12 @@ def _final_balance_palette(
         Balanced list of colors.
     """
     if len(colors) < 3:
+        return colors
+
+    # If balancing is disabled, return unchanged
+    if balance_mode == "off":
+        if log_func:
+            log_func("  Balancierung deaktiviert")
         return colors
 
     def log(msg):
@@ -2555,9 +2565,25 @@ class PaletteExtractor:
         image_rgb: np.ndarray,
         min_region_size: int,
     ) -> np.ndarray:
-        """Add numbers to each color region in the posterized image."""
+        """Add numbers to each color region in the posterized image.
+
+        Uses uniform font size. For small regions where the number
+        wouldn't fit, draws the number outside with a pointer line.
+        """
         result = image_bgr.copy()
         height, width = result.shape[:2]
+
+        # Calculate uniform font scale based on image size
+        image_diagonal = (width**2 + height**2) ** 0.5
+        font_scale = max(0.5, min(1.5, image_diagonal / 1200.0))
+        thickness = max(1, int(font_scale * 1.5))
+
+        # Get text dimensions for sample text to determine min area needed
+        sample_text = "88"  # Two digits as reference
+        (sample_width, sample_height), _ = cv2.getTextSize(
+            sample_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+        )
+        min_area_for_inside = sample_width * sample_height * 4  # Need 4x text area
 
         # For each unique color, find connected components
         unique_colors = np.unique(image_rgb.reshape(-1, 3), axis=0)
@@ -2587,49 +2613,94 @@ class PaletteExtractor:
                     best_area = area
                     best_label_id = label_id
 
-            # Only draw number if largest region meets minimum size
+            # Skip if no region found or too small to even show
             if best_label_id < 0 or best_area < min_region_size:
                 continue
 
-            # Get centroid of largest region
+            # Get region info
             cx, cy = centroids[best_label_id]
             cx, cy = int(cx), int(cy)
+            region_x = stats[best_label_id, cv2.CC_STAT_LEFT]
+            region_y = stats[best_label_id, cv2.CC_STAT_TOP]
+            region_w = stats[best_label_id, cv2.CC_STAT_WIDTH]
+            region_h = stats[best_label_id, cv2.CC_STAT_HEIGHT]
 
             # Determine text color based on background luminance
             color_int = (int(color_tuple[0]), int(color_tuple[1]), int(color_tuple[2]))
             tc = get_text_color_for_background(color_int)
             text_color = (int(tc[0]), int(tc[1]), int(tc[2]))
 
-            # Calculate font scale based on image size and region area
-            image_diagonal = (width**2 + height**2) ** 0.5
-            base_scale = image_diagonal / 1500.0
-
-            image_area = width * height
-            area_factor = min(1.3, max(0.7, (best_area / (image_area * 0.01)) ** 0.3))
-
-            font_scale = min(2.5, max(0.4, base_scale * area_factor))
-            thickness = max(1, int(font_scale * 2))
-
-            # Draw number
+            # Get actual text dimensions
             text = str(number)
             (text_width, text_height), baseline = cv2.getTextSize(
                 text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
 
-            # Center text
-            text_x = max(0, min(width - text_width, cx - text_width // 2))
-            text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+            # Check if region is large enough to fit text inside
+            fits_inside = (best_area >= min_area_for_inside and
+                          region_w >= text_width * 1.2 and
+                          region_h >= text_height * 1.2)
 
-            cv2.putText(
-                result,
-                text,
-                (text_x, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                text_color,
-                thickness,
-                cv2.LINE_AA,
-            )
+            if fits_inside:
+                # Draw number centered inside the region
+                text_x = max(0, min(width - text_width, cx - text_width // 2))
+                text_y = max(text_height, min(height - baseline, cy + text_height // 2))
+
+                cv2.putText(
+                    result,
+                    text,
+                    (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    text_color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+            else:
+                # Region too small - draw number outside with pointer line
+                # Find best position for external label (prefer right, then bottom)
+                margin = int(font_scale * 10)
+
+                # Try positions: right, left, bottom, top
+                candidates = [
+                    (region_x + region_w + margin, cy, "right"),
+                    (region_x - margin - text_width, cy, "left"),
+                    (cx, region_y + region_h + margin + text_height, "bottom"),
+                    (cx, region_y - margin, "top"),
+                ]
+
+                # Find first valid position
+                label_x, label_y = None, None
+                for lx, ly, direction in candidates:
+                    if (0 <= lx <= width - text_width and
+                        text_height <= ly <= height):
+                        label_x, label_y = lx, ly
+                        break
+
+                if label_x is None:
+                    # Fallback: just offset from centroid
+                    label_x = min(width - text_width, max(0, cx + margin))
+                    label_y = min(height, max(text_height, cy))
+
+                # Draw pointer line from region centroid to label
+                line_start = (cx, cy)
+                line_end = (label_x + text_width // 2, label_y - text_height // 2)
+                cv2.line(result, line_start, line_end, text_color, max(1, thickness - 1), cv2.LINE_AA)
+
+                # Draw small circle at region centroid
+                cv2.circle(result, (cx, cy), max(2, int(font_scale * 3)), text_color, -1, cv2.LINE_AA)
+
+                # Draw the number
+                cv2.putText(
+                    result,
+                    text,
+                    (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    text_color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
 
         return result
 
