@@ -28,9 +28,11 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QFormLayout,
     QDialogButtonBox,
+    QScrollArea,
+    QFrame,
 )
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt6.QtGui import QFont, QPixmap, QImage, QColor, QPainter, QPen, QCursor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QPoint
 from PyQt6.QtWidgets import QToolTip
 
 from gui.widgets import (
@@ -548,6 +550,250 @@ class AdvancedSettingsDialog(QDialog):
         }
 
 
+class ColorPickerDialog(QDialog):
+    """Dialog for manually picking anchor colors from the source image."""
+
+    colors_changed = pyqtSignal(list)
+
+    def __init__(self, image: np.ndarray, max_colors: int = 12, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manuelle Farbauswahl")
+        self.setMinimumSize(700, 500)
+
+        self._image = image
+        self._max_colors = max_colors
+        self._picked_colors: List[tuple] = []
+        self._zoom_factor = 2.0
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Info label
+        info = QLabel(f"Klicken Sie auf das Bild, um Farben auszuwählen (max {self._max_colors})")
+        info.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(info)
+
+        # Main content: image + color list
+        content_layout = QHBoxLayout()
+
+        # Scrollable image area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumSize(450, 350)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        self._image_label.mousePressEvent = self._on_image_click
+        self._image_label.mouseMoveEvent = self._on_mouse_move
+        self._image_label.setMouseTracking(True)
+
+        scroll.setWidget(self._image_label)
+        content_layout.addWidget(scroll, stretch=3)
+
+        # Color list panel
+        color_panel = QWidget()
+        color_layout = QVBoxLayout(color_panel)
+        color_layout.setContentsMargins(10, 0, 0, 0)
+
+        color_label = QLabel("Ausgewählte Farben:")
+        color_label.setStyleSheet("font-weight: bold;")
+        color_layout.addWidget(color_label)
+
+        self._color_list_widget = QWidget()
+        self._color_list_layout = QVBoxLayout(self._color_list_widget)
+        self._color_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._color_list_layout.setSpacing(5)
+        self._color_list_layout.addStretch()
+
+        color_scroll = QScrollArea()
+        color_scroll.setWidget(self._color_list_widget)
+        color_scroll.setWidgetResizable(True)
+        color_scroll.setMinimumWidth(150)
+        color_scroll.setMaximumWidth(200)
+        color_layout.addWidget(color_scroll, stretch=1)
+
+        clear_btn = QPushButton("Alle entfernen")
+        clear_btn.clicked.connect(self._clear_colors)
+        color_layout.addWidget(clear_btn)
+
+        content_layout.addWidget(color_panel, stretch=1)
+        layout.addLayout(content_layout)
+
+        # Zoom controls
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("Zoom:"))
+
+        zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setMaximumWidth(30)
+        zoom_out_btn.clicked.connect(lambda: self._set_zoom(self._zoom_factor / 1.5))
+        zoom_layout.addWidget(zoom_out_btn)
+
+        self._zoom_label = QLabel("2.0x")
+        self._zoom_label.setMinimumWidth(50)
+        zoom_layout.addWidget(self._zoom_label)
+
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setMaximumWidth(30)
+        zoom_in_btn.clicked.connect(lambda: self._set_zoom(self._zoom_factor * 1.5))
+        zoom_layout.addWidget(zoom_in_btn)
+
+        zoom_layout.addStretch()
+        layout.addLayout(zoom_layout)
+
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self._update_image()
+
+    def _set_zoom(self, factor: float):
+        self._zoom_factor = max(0.5, min(5.0, factor))
+        self._zoom_label.setText(f"{self._zoom_factor:.1f}x")
+        self._update_image()
+
+    def _update_image(self):
+        """Update the displayed image with current zoom."""
+        if self._image is None:
+            return
+
+        # Convert BGR to RGB for display
+        if len(self._image.shape) == 3:
+            rgb = self._image[:, :, ::-1].copy()
+        else:
+            rgb = self._image
+
+        h, w = rgb.shape[:2]
+        new_w = int(w * self._zoom_factor)
+        new_h = int(h * self._zoom_factor)
+
+        # Create QImage
+        if len(rgb.shape) == 3:
+            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        else:
+            qimg = QImage(rgb.data, w, h, w, QImage.Format.Format_Grayscale8)
+
+        pixmap = QPixmap.fromImage(qimg)
+        pixmap = pixmap.scaled(new_w, new_h, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        self._image_label.setPixmap(pixmap)
+
+    def _on_image_click(self, event):
+        """Handle click on image to pick color."""
+        if len(self._picked_colors) >= self._max_colors:
+            QMessageBox.warning(self, "Maximum erreicht",
+                               f"Sie können maximal {self._max_colors} Farben auswählen.")
+            return
+
+        # Get click position relative to image
+        pos = event.pos()
+        pixmap = self._image_label.pixmap()
+        if pixmap is None:
+            return
+
+        # Calculate image coordinates
+        img_x = int(pos.x() / self._zoom_factor)
+        img_y = int(pos.y() / self._zoom_factor)
+
+        h, w = self._image.shape[:2]
+        if 0 <= img_x < w and 0 <= img_y < h:
+            # Get color (BGR format)
+            if len(self._image.shape) == 3:
+                b, g, r = self._image[img_y, img_x]
+            else:
+                r = g = b = self._image[img_y, img_x]
+
+            color = (int(r), int(g), int(b))
+
+            # Check if color already picked
+            if color not in self._picked_colors:
+                self._picked_colors.append(color)
+                self._update_color_list()
+                self.colors_changed.emit(self._picked_colors)
+
+    def _on_mouse_move(self, event):
+        """Show color under cursor in tooltip."""
+        pos = event.pos()
+        img_x = int(pos.x() / self._zoom_factor)
+        img_y = int(pos.y() / self._zoom_factor)
+
+        h, w = self._image.shape[:2]
+        if 0 <= img_x < w and 0 <= img_y < h:
+            if len(self._image.shape) == 3:
+                b, g, r = self._image[img_y, img_x]
+            else:
+                r = g = b = self._image[img_y, img_x]
+            QToolTip.showText(event.globalPosition().toPoint(),
+                             f"RGB({r}, {g}, {b})")
+
+    def _update_color_list(self):
+        """Update the color swatch list."""
+        # Clear existing
+        while self._color_list_layout.count() > 1:  # Keep stretch
+            item = self._color_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Add color swatches
+        for i, color in enumerate(self._picked_colors):
+            swatch = QFrame()
+            swatch.setFixedSize(140, 30)
+            swatch_layout = QHBoxLayout(swatch)
+            swatch_layout.setContentsMargins(2, 2, 2, 2)
+            swatch_layout.setSpacing(5)
+
+            # Color preview
+            color_preview = QLabel()
+            color_preview.setFixedSize(24, 24)
+            color_preview.setStyleSheet(
+                f"background-color: rgb({color[0]}, {color[1]}, {color[2]}); "
+                f"border: 1px solid #888; border-radius: 2px;"
+            )
+            swatch_layout.addWidget(color_preview)
+
+            # Color text
+            color_text = QLabel(f"#{color[0]:02X}{color[1]:02X}{color[2]:02X}")
+            color_text.setStyleSheet("font-size: 10px;")
+            swatch_layout.addWidget(color_text)
+
+            # Remove button
+            remove_btn = QPushButton("×")
+            remove_btn.setFixedSize(20, 20)
+            remove_btn.setStyleSheet("font-size: 14px; padding: 0;")
+            remove_btn.clicked.connect(lambda checked, idx=i: self._remove_color(idx))
+            swatch_layout.addWidget(remove_btn)
+
+            self._color_list_layout.insertWidget(i, swatch)
+
+    def _remove_color(self, index: int):
+        """Remove a color from the list."""
+        if 0 <= index < len(self._picked_colors):
+            self._picked_colors.pop(index)
+            self._update_color_list()
+            self.colors_changed.emit(self._picked_colors)
+
+    def _clear_colors(self):
+        """Clear all picked colors."""
+        self._picked_colors.clear()
+        self._update_color_list()
+        self.colors_changed.emit(self._picked_colors)
+
+    def get_colors(self) -> List[tuple]:
+        """Get the list of picked RGB colors."""
+        return self._picked_colors.copy()
+
+    def set_colors(self, colors: List[tuple]):
+        """Set initial colors."""
+        self._picked_colors = list(colors)[:self._max_colors]
+        self._update_color_list()
+
+
 @dataclass
 class ProcessingOptions:
     """Options for the processing worker."""
@@ -568,6 +814,7 @@ class ProcessingOptions:
     color_boost: bool = False
     palette_source: str = "original"  # "original" or "preprocessed"
     advanced_params: Optional[dict] = None  # Advanced clustering settings
+    manual_anchors: Optional[List[tuple]] = None  # Manually picked anchor colors [(R,G,B), ...]
 
 
 class ProcessingWorker(QThread):
@@ -616,6 +863,7 @@ class ProcessingWorker(QThread):
                 palette_method=opts.palette_method,
                 balance_mode=opts.balance_mode,
                 advanced_params=opts.advanced_params,
+                manual_anchors=opts.manual_anchors,
             )
             palette_extractor = PaletteExtractor(palette_settings)
 
@@ -777,6 +1025,7 @@ class MainWindow(QMainWindow):
         self._is_new_image_load: bool = False
         self._settings_changed_since_process: bool = False
         self._debug_log: str = ""  # Store debug log from palette extraction
+        self._manual_anchors: List[tuple] = []  # Manually picked anchor colors
 
         self._setup_ui()
         self._connect_signals()
@@ -820,6 +1069,13 @@ class MainWindow(QMainWindow):
         self._debug_button.setToolTip("Debug: Zeigt detaillierte Farbanalyse-Informationen")
         toolbar_layout.addWidget(self._debug_button)
 
+        # Color picker button (Manual Anchorpoints)
+        self._colorpicker_button = QPushButton("🎨")
+        self._colorpicker_button.setMaximumWidth(40)
+        self._colorpicker_button.setEnabled(False)
+        self._colorpicker_button.setToolTip("Manuelle Farbauswahl: Wählen Sie Ankerfarben aus dem Quellbild")
+        toolbar_layout.addWidget(self._colorpicker_button)
+
         # Advanced settings button
         self._advanced_button = QPushButton("⚙️")
         self._advanced_button.setMaximumWidth(40)
@@ -853,6 +1109,38 @@ class MainWindow(QMainWindow):
 
         self._source_preview = ImagePreview("Quellbild")
         left_layout.addWidget(self._source_preview, stretch=2)
+
+        # Image manipulation buttons (Cut/Flip/Rotate)
+        image_buttons_layout = QHBoxLayout()
+        image_buttons_layout.setSpacing(5)
+
+        self._crop_button = QPushButton("✂️ Zuschneiden")
+        self._crop_button.setEnabled(False)
+        self._crop_button.setToolTip("Bild zuschneiden (Auswahl im Vorschaufenster)")
+        image_buttons_layout.addWidget(self._crop_button)
+
+        self._flip_h_button = QPushButton("↔️ Spiegeln H")
+        self._flip_h_button.setEnabled(False)
+        self._flip_h_button.setToolTip("Horizontal spiegeln")
+        image_buttons_layout.addWidget(self._flip_h_button)
+
+        self._flip_v_button = QPushButton("↕️ Spiegeln V")
+        self._flip_v_button.setEnabled(False)
+        self._flip_v_button.setToolTip("Vertikal spiegeln")
+        image_buttons_layout.addWidget(self._flip_v_button)
+
+        self._rotate_left_button = QPushButton("↺ 90°")
+        self._rotate_left_button.setEnabled(False)
+        self._rotate_left_button.setToolTip("90° nach links drehen")
+        image_buttons_layout.addWidget(self._rotate_left_button)
+
+        self._rotate_right_button = QPushButton("↻ 90°")
+        self._rotate_right_button.setEnabled(False)
+        self._rotate_right_button.setToolTip("90° nach rechts drehen")
+        image_buttons_layout.addWidget(self._rotate_right_button)
+
+        image_buttons_layout.addStretch()
+        left_layout.addLayout(image_buttons_layout)
 
         # Abstraction settings panel
         self._abstraction_panel = AbstractionSettingsPanel()
@@ -914,6 +1202,7 @@ class MainWindow(QMainWindow):
         self._save_all_button.clicked.connect(self._save_all)
         self._display_combo.currentIndexChanged.connect(self._on_display_changed)
         self._debug_button.clicked.connect(self._show_debug_dialog)
+        self._colorpicker_button.clicked.connect(self._show_color_picker)
         self._advanced_button.clicked.connect(self._show_advanced_settings)
 
         self._outlines_panel.save_requested.connect(self._save_result)
@@ -924,6 +1213,13 @@ class MainWindow(QMainWindow):
         # Settings changed signals
         self._settings_panel.settings_changed.connect(self._on_settings_changed)
         self._abstraction_panel.settings_changed.connect(self._on_settings_changed)
+
+        # Image manipulation buttons
+        self._flip_h_button.clicked.connect(self._flip_horizontal)
+        self._flip_v_button.clicked.connect(self._flip_vertical)
+        self._rotate_left_button.clicked.connect(self._rotate_left)
+        self._rotate_right_button.clicked.connect(self._rotate_right)
+        self._crop_button.clicked.connect(self._start_crop)
 
     def _show_debug_dialog(self) -> None:
         """Show the debug dialog with palette analysis information."""
@@ -944,6 +1240,32 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             # Settings were saved, trigger reprocessing if image loaded
             if self._source_image is not None:
+                self._on_settings_changed()
+
+    def _show_color_picker(self) -> None:
+        """Show the manual color picker dialog."""
+        if self._source_image is None:
+            return
+
+        # Get max colors from settings
+        max_colors = self._settings_panel.get_steps()
+
+        dialog = ColorPickerDialog(self._source_image, max_colors, self)
+        dialog.set_colors(self._manual_anchors)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._manual_anchors = dialog.get_colors()
+            # Update button appearance to indicate active colors
+            if self._manual_anchors:
+                self._colorpicker_button.setToolTip(
+                    f"Manuelle Farbauswahl: {len(self._manual_anchors)}/{max_colors} Farben ausgewählt"
+                )
+            else:
+                self._colorpicker_button.setToolTip(
+                    "Manuelle Farbauswahl: Wählen Sie Ankerfarben aus dem Quellbild"
+                )
+            # Trigger reprocessing if colors changed
+            if self._results:
                 self._on_settings_changed()
 
     def _on_settings_changed(self) -> None:
@@ -987,9 +1309,20 @@ class MainWindow(QMainWindow):
                 self._source_image = image
                 self._abstracted_image = None
                 self._current_file_path = file_path
+                self._manual_anchors = []  # Reset manual anchors for new image
                 self._source_preview.set_image(image)
                 self._display_combo.setCurrentIndex(0)  # Reset to "Quelle"
                 self._display_combo.setEnabled(False)
+                self._colorpicker_button.setEnabled(True)  # Enable color picker
+                self._colorpicker_button.setToolTip(
+                    "Manuelle Farbauswahl: Wählen Sie Ankerfarben aus dem Quellbild"
+                )
+                # Enable image manipulation buttons
+                self._crop_button.setEnabled(True)
+                self._flip_h_button.setEnabled(True)
+                self._flip_v_button.setEnabled(True)
+                self._rotate_left_button.setEnabled(True)
+                self._rotate_right_button.setEnabled(True)
                 self._clear_results()
 
                 info = ImageIO.get_image_info(file_path)
@@ -1055,6 +1388,7 @@ class MainWindow(QMainWindow):
             color_boost=self._abstraction_panel.is_color_boost_enabled(),
             palette_source=self._abstraction_panel.get_palette_source(),
             advanced_params=advanced_params,
+            manual_anchors=self._manual_anchors if self._manual_anchors else None,
         )
 
     def _process_image(self, is_new_image: bool = False) -> None:
@@ -1376,6 +1710,112 @@ class MainWindow(QMainWindow):
                 f.write('\n'.join(lines) + '\n')
         except OSError:
             pass  # Non-critical - don't interrupt save flow
+
+    def _flip_horizontal(self) -> None:
+        """Flip the source image horizontally."""
+        if self._source_image is None:
+            return
+
+        import cv2
+        self._source_image = cv2.flip(self._source_image, 1)  # 1 = horizontal
+        self._source_preview.set_image(self._source_image)
+        self._display_combo.setCurrentIndex(0)  # Reset to source view
+        self._clear_results()
+        self._status_bar.showMessage("Bild horizontal gespiegelt")
+        # Auto-reprocess
+        self._process_image(is_new_image=True)
+
+    def _flip_vertical(self) -> None:
+        """Flip the source image vertically."""
+        if self._source_image is None:
+            return
+
+        import cv2
+        self._source_image = cv2.flip(self._source_image, 0)  # 0 = vertical
+        self._source_preview.set_image(self._source_image)
+        self._display_combo.setCurrentIndex(0)  # Reset to source view
+        self._clear_results()
+        self._status_bar.showMessage("Bild vertikal gespiegelt")
+        # Auto-reprocess
+        self._process_image(is_new_image=True)
+
+    def _rotate_left(self) -> None:
+        """Rotate the source image 90° counter-clockwise."""
+        if self._source_image is None:
+            return
+
+        import cv2
+        self._source_image = cv2.rotate(self._source_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        self._source_preview.set_image(self._source_image)
+        self._display_combo.setCurrentIndex(0)  # Reset to source view
+        self._clear_results()
+        self._status_bar.showMessage("Bild 90° nach links gedreht")
+        # Auto-reprocess
+        self._process_image(is_new_image=True)
+
+    def _rotate_right(self) -> None:
+        """Rotate the source image 90° clockwise."""
+        if self._source_image is None:
+            return
+
+        import cv2
+        self._source_image = cv2.rotate(self._source_image, cv2.ROTATE_90_CLOCKWISE)
+        self._source_preview.set_image(self._source_image)
+        self._display_combo.setCurrentIndex(0)  # Reset to source view
+        self._clear_results()
+        self._status_bar.showMessage("Bild 90° nach rechts gedreht")
+        # Auto-reprocess
+        self._process_image(is_new_image=True)
+
+    def _start_crop(self) -> None:
+        """Start crop mode - allow user to select area to keep."""
+        if self._source_image is None:
+            return
+
+        # For now, show a simple input dialog for crop coordinates
+        # A full crop UI with rubber band selection would be more user-friendly
+        from PyQt6.QtWidgets import QInputDialog
+
+        h, w = self._source_image.shape[:2]
+        text, ok = QInputDialog.getText(
+            self,
+            "Zuschneiden",
+            f"Bildgröße: {w}x{h}\n\nGeben Sie den Bereich ein (x,y,breite,höhe):\n"
+            f"Beispiel: 100,100,400,300",
+            text=f"0,0,{w},{h}"
+        )
+
+        if ok and text:
+            try:
+                parts = [int(p.strip()) for p in text.split(",")]
+                if len(parts) != 4:
+                    raise ValueError("Benötigt 4 Werte")
+                x, y, crop_w, crop_h = parts
+
+                # Validate bounds
+                if x < 0 or y < 0 or crop_w <= 0 or crop_h <= 0:
+                    raise ValueError("Ungültige Werte")
+                if x + crop_w > w or y + crop_h > h:
+                    raise ValueError("Bereich außerhalb des Bildes")
+
+                # Perform crop
+                self._source_image = self._source_image[y:y+crop_h, x:x+crop_w].copy()
+                self._source_preview.set_image(self._source_image)
+                self._display_combo.setCurrentIndex(0)
+                self._clear_results()
+                self._status_bar.showMessage(
+                    f"Bild zugeschnitten auf {crop_w}x{crop_h} px"
+                )
+                # Auto-reprocess
+                self._process_image(is_new_image=True)
+
+            except (ValueError, IndexError) as e:
+                QMessageBox.warning(
+                    self,
+                    "Fehler beim Zuschneiden",
+                    f"Ungültige Eingabe: {e}\n\n"
+                    f"Format: x,y,breite,höhe (z.B. 100,100,400,300)"
+                )
 
     def closeEvent(self, event) -> None:
         """Save settings when closing the window."""

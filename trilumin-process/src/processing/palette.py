@@ -47,6 +47,7 @@ class PaletteSettings:
     palette_method: PaletteMethod = PaletteMethod.INTENSIFY  # Extraction method
     balance_mode: str = "balanced"  # "balanced" (global 2:1) or "off" (no balancing)
     advanced_params: Optional[dict] = None  # Advanced clustering settings from dialog
+    manual_anchors: Optional[List[Tuple[int, int, int]]] = None  # Manually picked RGB anchor colors
 
 
 @dataclass
@@ -1915,12 +1916,50 @@ class PaletteExtractor:
                      f"Familie={fam}, Fläche={c.percentage:.1f}%")
 
         # =====================================================================
+        # MANUAL ANCHOR COLORS (if provided by user)
+        # =====================================================================
+        colors = []
+        num_colors = self.settings.num_colors
+
+        if self.settings.manual_anchors:
+            self._log(f"\n--- MANUELLE ANKERFARBEN ---")
+            self._log(f"Vom Benutzer ausgewählt: {len(self.settings.manual_anchors)} Farben")
+
+            for i, rgb in enumerate(self.settings.manual_anchors):
+                r, g, b = rgb
+                color_info = ColorInfo.from_rgb(r, g, b, percentage=0.0, index=i + 1)
+                colors.append(color_info)
+                fam = _get_color_family(rgb)
+                h, s, l = _get_hsl(rgb)
+                self._log(f"  Manuell {i+1}: {color_info.name} RGB{rgb}, "
+                         f"HSL({h:.0f}°, {s:.0f}%, {l:.0f}%), Familie={fam}")
+
+            # If ALL colors are manually selected, skip method selection entirely
+            if len(colors) >= num_colors:
+                self._log(f"\nAlle {num_colors} Farben manuell ausgewählt - überspringe Clustering-Auswahl")
+                colors = colors[:num_colors]
+
+                # Apply sorting and update indices
+                colors = sort_palette(
+                    colors,
+                    self.settings.sort_method,
+                    self.settings.grays_position,
+                    self.settings.gray_threshold,
+                )
+                for idx, color in enumerate(colors, start=1):
+                    color.index = idx
+
+                self._store_final_colors(colors)
+                self._cluster_colors = all_cluster_colors
+                return colors
+
+            self._log(f"Fülle verbleibende {num_colors - len(colors)} Slots aus Clustering...")
+
+        # =====================================================================
         # METHOD-SPECIFIC COLOR SELECTION
         # All methods: First fill one color per family, then add more by method
         # =====================================================================
 
-        colors = []
-        num_colors = self.settings.num_colors
         self._log(f"\n--- FARBAUSWAHL STARTET ---")
 
         if self.settings.palette_method == PaletteMethod.STANDARD:
