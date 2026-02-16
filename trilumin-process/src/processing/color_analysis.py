@@ -436,25 +436,61 @@ class ColorAnalysisEngine:
         """Extract palette using Gaussian Mixture Model."""
         random_state = self.params.random_state if self.params.use_fixed_seed else None
 
-        # Subsample for GMM
-        if len(pixels) > 10000:
+        # Subsample for GMM (needs more samples relative to components)
+        max_samples = max(20000, self.params.n_colors * 500)
+        if len(pixels) > max_samples:
             rng = np.random.RandomState(random_state)
-            indices = rng.choice(len(pixels), 10000, replace=False)
+            indices = rng.choice(len(pixels), max_samples, replace=False)
             sample = pixels[indices]
         else:
             sample = pixels
 
-        gmm = GaussianMixture(
-            n_components=self.params.n_colors,
-            covariance_type=self.params.gmm_covariance_type,
-            max_iter=self.params.gmm_max_iter,
-            random_state=random_state,
-        )
-        gmm.fit(sample)
+        # Use float64 for numerical stability (as sklearn recommends)
+        sample = sample.astype(np.float64)
+
+        # Limit components to avoid ill-defined covariance with too few samples
+        n_components = min(self.params.n_colors, max(1, len(sample) // 50))
+
+        try:
+            gmm = GaussianMixture(
+                n_components=n_components,
+                covariance_type=self.params.gmm_covariance_type,
+                max_iter=self.params.gmm_max_iter,
+                random_state=random_state,
+                reg_covar=1e-4,  # Regularization to prevent singular covariance
+            )
+            gmm.fit(sample)
+        except Exception:
+            # Fallback: try with diagonal covariance (more stable)
+            try:
+                gmm = GaussianMixture(
+                    n_components=n_components,
+                    covariance_type="diag",
+                    max_iter=self.params.gmm_max_iter,
+                    random_state=random_state,
+                    reg_covar=1e-3,
+                )
+                gmm.fit(sample)
+            except Exception:
+                # Final fallback: use K-Means instead
+                from sklearn.cluster import MiniBatchKMeans
+                kmeans = MiniBatchKMeans(
+                    n_clusters=n_components,
+                    random_state=random_state,
+                    batch_size=1024,
+                )
+                kmeans.fit(sample)
+                self._cluster_labels = kmeans.labels_
+                self._cluster_centers = kmeans.cluster_centers_
+                self._n_clusters_found = n_components
+                return [
+                    (int(c[0]), int(c[1]), int(c[2]))
+                    for c in kmeans.cluster_centers_.astype(np.uint8)
+                ]
 
         self._cluster_labels = gmm.predict(sample)
         self._cluster_centers = gmm.means_
-        self._n_clusters_found = self.params.n_colors
+        self._n_clusters_found = n_components
 
         return [
             (int(c[0]), int(c[1]), int(c[2]))

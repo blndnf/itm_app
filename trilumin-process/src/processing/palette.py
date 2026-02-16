@@ -1802,27 +1802,34 @@ class PaletteExtractor:
                 gmm_max_iter=adv.get("gmm_max_iter", 100),
             )
             engine = ColorAnalysisEngine(method=clustering_method, params=params)
-            palette_rgb = engine.extract_palette(rgb_image, n_colors=total_clusters)
+            try:
+                palette_rgb = engine.extract_palette(rgb_image, n_colors=total_clusters)
 
-            # Convert palette to cluster centers array
-            all_cluster_colors = np.array(palette_rgb, dtype=np.uint8)
-            n_found = len(all_cluster_colors)
-            self._log(f"  {clustering_method} fand {n_found} Cluster")
+                # Convert palette to cluster centers array
+                all_cluster_colors = np.array(palette_rgb, dtype=np.uint8)
+                n_found = len(all_cluster_colors)
+                self._log(f"  {clustering_method} fand {n_found} Cluster")
 
-            # Assign labels to all pixels via nearest-neighbor (batched for memory)
-            centers_float = all_cluster_colors.astype(np.float32)
-            all_labels = np.empty(len(pixels), dtype=np.int32)
-            batch_size = 10000
-            for start in range(0, len(pixels), batch_size):
-                end = min(start + batch_size, len(pixels))
-                batch = pixels[start:end]
-                dists = np.linalg.norm(
-                    batch[:, np.newaxis, :] - centers_float[np.newaxis, :, :], axis=2
-                )
-                all_labels[start:end] = np.argmin(dists, axis=1)
-            self._labels = all_labels
-            self._kmeans = None
-        else:
+                # Assign labels to all pixels via nearest-neighbor (batched for memory)
+                centers_float = all_cluster_colors.astype(np.float32)
+                all_labels = np.empty(len(pixels), dtype=np.int32)
+                batch_size = 10000
+                for start in range(0, len(pixels), batch_size):
+                    end = min(start + batch_size, len(pixels))
+                    batch = pixels[start:end]
+                    dists = np.linalg.norm(
+                        batch[:, np.newaxis, :] - centers_float[np.newaxis, :, :], axis=2
+                    )
+                    all_labels[start:end] = np.argmin(dists, axis=1)
+                self._labels = all_labels
+                self._kmeans = None
+            except Exception as e:
+                # Fallback to K-Means if alternative method fails
+                self._log(f"  WARNUNG: {clustering_method} fehlgeschlagen: {e}")
+                self._log(f"  Fallback auf K-Means...")
+                clustering_method = "kmeans"  # Will fall through to kmeans block below
+
+        if clustering_method == "kmeans":
             # Default: K-Means clustering
             random_state = adv.get("random_state", self.settings.random_state) if adv.get("use_fixed_seed", True) else None
             max_iter = adv.get("kmeans_max_iter", self.settings.max_iterations)
